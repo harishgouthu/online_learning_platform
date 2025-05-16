@@ -4,13 +4,16 @@ from django.urls import path
 from .views import (CourseAPIView, AskQuestionAPIView, UserQaWatchedSessionsView, VideoAPIView,
                     AllUsersWatchedSessionsView, ClipTabAPIView, UserClipWatchedSessionsView,
                     CreateNotesAPIView,  GetNotesAPIView, CombinedDataAPIView, CreateSessionAPIView,
-                    VideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView)
+                    VideoCourseUpdateView, YoutubeVideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView, CourseVideosAPIView)
 
 urlpatterns = [
     path('courses/', CourseAPIView.as_view(), name='course-api'),
     path('courses/<int:pk>/', CourseAPIView.as_view(), name='course-api-detail'),
     path('unlinked-videos/', UnlinkedVideosAPIView.as_view(), name='unlinked-videos'),
+    path('courses/<int:course_id>/videos/', CourseVideosAPIView.as_view(), name='course-videos'),
     path('videos/<int:pk>/update-course/', VideoCourseUpdateView.as_view(), name='video-update-course'),
+    path('videos/update-course-by-url/', YoutubeVideoCourseUpdateView.as_view(), name='video-update-course-by-url'),
+
     path('videos/', VideoAPIView.as_view(), name='video-api'),
     path('search-course/', CourseVideoListView.as_view(), name='course-videos-list'),
 

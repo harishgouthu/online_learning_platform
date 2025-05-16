@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 import logging
 import requests
-
+from rest_framework.exceptions import ValidationError
 logger = logging.getLogger(__name__)
 
 
@@ -109,4 +109,6 @@ class ProfileViewSet(viewsets.ModelViewSet):
         return Profile.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
+        if Profile.objects.filter(user=self.request.user).exists():
+            raise ValidationError("Profile already exists for this user.")
         serializer.save(user=self.request.user)

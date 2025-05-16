@@ -444,47 +444,7 @@ class ClipTabAPIView(APIView):
 
 class CreateNotesAPIView(APIView):
     permission_classes = [IsAuthenticated]
-#
-#     def post(self, request):
-#         serializer = CreateNoteSerializer(data=request.data)
-#         if serializer.is_valid():
-#             user = request.user
-#             video_url = serializer.validated_data['youtube_video_url']
-#             notes = serializer.validated_data['notes']
-#             time_stamp = serializer.validated_data['time_stamp']
-#
-#             video_id = extract_youtube_video_id(video_url)
-#             if not video_id:
-#                 return Response({'error': 'Invalid YouTube URL.'}, status=400)
-#
-#             video_title = fetch_video_title(video_id)
-#             if not video_title:
-#                 return Response({'error': 'Could not retrieve video title.'}, status=400)
-#
-#             video, _ = VideoModel.objects.get_or_create(
-#                 youtube_video_id=video_id,
-#                 defaults={'video_title': video_title, 'video_url': video_url, 'user': user}
-#             )
-#
-#             session, created = SessionModel.objects.get_or_create(user=user, video=video)
-#             session_status = "New session created" if created else "Session resumed"
-#
-#             note = NotesModel.objects.create(
-#                 session=session,
-#                 notes=notes,
-#                 time_stamp=time_stamp
-#             )
-#
-#             return Response({
-#                 'id': note.id,
-#                 'notes': note.notes,
-#                 'session': session.id,
-#                 'session_status': session_status,
-#                 'time_stamp': note.time_stamp,
-#                 'created_at': note.created_at
-#             }, status=status.HTTP_201_CREATED)
-#
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
     def post(self, request):
         serializer = CreateNoteSerializer(data=request.data)
         if serializer.is_valid():
@@ -836,7 +796,25 @@ class VideoCourseUpdateView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class YoutubeVideoCourseUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def patch(self, request):
+        youtube_url = request.data.get('video_url')
+        if not youtube_url:
+            return Response({'error': 'video_url is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        youtube_video_id = extract_youtube_video_id(youtube_url)
+        if not youtube_video_id:
+            return Response({'error': 'Invalid YouTube URL.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        video = get_object_or_404(VideoModel, youtube_video_id=youtube_video_id, user=request.user)
+
+        serializer = VideoCourseUpdateSerializer(video, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class CourseVideoListView(ListAPIView):
     serializer_class = VideoSerializer
     permission_classes = [IsAuthenticated]
@@ -884,7 +862,12 @@ class UnlinkedVideosAPIView(APIView):
 
         serializer = VideoSerializer(unlinked_videos, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
+class CourseVideosAPIView(APIView):
+    def get(self, request, course_id):
+        course = get_object_or_404(CourseModel, id=course_id)
+        videos = VideoModel.objects.filter(course=course)
+        serializer = VideoSerializer(videos, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class AllUsersWatchedSessionsView(APIView):
     def get(self, request):

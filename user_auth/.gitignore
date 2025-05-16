@@ -1,0 +1,47 @@
+# Python/Django-specific ignores
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+*.egg
+*.manifest
+*.spec
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Database files
+db.sqlite3
+*.sqlite3
+
+# Environment variables
+.env
+.env/*
+
+# Logs
+django.log
+*.log
+logs/
+
+# IDE/Editor specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS files
+.DS_Store
+
+# Windows files
+Thumbs.db
+
+# Deployment/CI files
+.coverage
+htmlcov/
+
+# Static files (if collected)
+/staticfiles/
+/media/
