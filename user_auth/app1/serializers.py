@@ -83,7 +83,9 @@ class CourseModelSerializer(serializers.ModelSerializer):
         course_name = attrs.get('course_name')
 
         if CourseModel.objects.filter(user=user, course_name__iexact=course_name).exists():
-            raise serializers.ValidationError("You already have a course with this name.")
+            raise serializers.ValidationError({
+                'course_name': 'You already have a course with this name.'
+            })
 
         return attrs
 

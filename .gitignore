@@ -1,0 +1,3 @@
+# Ignore Google credentials and logs
+*.json
+*.log

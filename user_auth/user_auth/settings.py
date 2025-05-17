@@ -149,6 +149,12 @@ REST_AUTH_SERIALIZERS = {
 }
 
 
+# REST_FRAMEWORK = {
+#     'DEFAULT_PAGINATION_CLASS': 'user_auth.pagination.PreserveQueryParamsPagination',
+#     'PAGE_SIZE': 5,
+# }
+
+
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
