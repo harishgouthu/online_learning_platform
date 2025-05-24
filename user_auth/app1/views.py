@@ -591,12 +591,43 @@ class CreateNotesAPIView(APIView):
                 "message": "Note not found or you do not have permission to delete it."
             }, status=status.HTTP_404_NOT_FOUND)
 
+    def put(self, request):
+        note_id = request.data.get('note_id')
+        if not note_id:
+            return Response({
+                "success": False,
+                "message": "'note_id' field is required to update a note."
+            }, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            note = NotesModel.objects.get(id=note_id, session__user=request.user)
+        except NotesModel.DoesNotExist:
+            return Response({
+                "success": False,
+                "message": "Note not found or you do not have permission to edit it."
+            }, status=status.HTTP_404_NOT_FOUND)
 
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.views import APIView
+        serializer = CreateNoteSerializer(note, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response({
+                "success": False,
+                "message": "Invalid input. Please correct the errors below.",
+                "errors": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+
+        return Response({
+            "success": True,
+            "message": "Note updated successfully.",
+            "data": {
+                "id": note.id,
+                "notes": note.notes,
+                "time_stamp": note.time_stamp,
+                "updated_at": note.updated_at
+            }
+        }, status=status.HTTP_200_OK)
+
 
 class CombinedDataAPIView(APIView):
     permission_classes = [IsAuthenticated]
