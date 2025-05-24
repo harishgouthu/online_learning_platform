@@ -22,6 +22,8 @@ urlpatterns = [
     path('cliptab/', ClipTabAPIView.as_view(), name='cliptab'), #post/get/del
 
     path('create-note/', CreateNotesAPIView.as_view(), name='create-note'), #post/get/del
+    path('notes/<int:note_id>/', CreateNotesAPIView.as_view(), name='update-note'), #edit
+
 
     path('combined-api/', CombinedDataAPIView.as_view(), name='combinedapi'),#get/del
 
