@@ -34,7 +34,10 @@ from .serializers import (
     YoutubeTranscriptSerializer,
     TimestampField,
 )
-
+import os
+import whisper
+import yt_dlp
+import uuid
 from user_auth.pagination import PreserveQueryParamsPagination
 import re
 import logging
@@ -109,78 +112,49 @@ def fetch_video_title(video_id, youtube_api_key):
 
 # --- Transcript Fetching using a hypothetical Third-Party API ---
 
-def fetch_transcript(video_id, max_retries=3, initial_delay=2):
-    """
-    Fetches the transcript for a YouTube video using a third-party API.
-    You will need to replace 'YOUR_THIRD_PARTY_API_ENDPOINT' and 'YOUR_THIRD_PARTY_API_KEY'
-    with actual values from the service you choose (e.g., Apify).
 
-    This function expects the third-party API to return data in a format
-    similar to: [{'text': '...', 'start': float, 'duration': float}, ...]
-    or you'll need to adapt the parsing logic inside.
+def fetch_transcript(video_id):
     """
-    third_party_api_endpoint = getattr(settings, 'THIRD_PARTY_TRANSCRIPT_API_ENDPOINT', None)
-    third_party_api_key = getattr(settings, 'THIRD_PARTY_TRANSCRIPT_API_KEY', None)
+    Downloads YouTube audio using yt-dlp and transcribes it using OpenAI Whisper.
+    """
+    try:
+        # Create a unique filename
+        unique_id = str(uuid.uuid4())
+        audio_path = f"/tmp/{unique_id}.mp3"
 
-    if not third_party_api_endpoint or not third_party_api_key:
-        logger.error(
-            "THIRD_PARTY_TRANSCRIPT_API_ENDPOINT or THIRD_PARTY_TRANSCRIPT_API_KEY is not configured in settings.")
+        # Download audio using yt-dlp
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': audio_path,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': True
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        # Load Whisper model (you can change to "small", "medium" etc.)
+        model = whisper.load_model("base")
+        result = model.transcribe(audio_path)
+
+        # Format result to match expected transcript structure
+        transcript_data = [
+            {'text': seg['text'], 'start': seg['start'], 'duration': seg['end'] - seg['start']}
+            for seg in result.get('segments', [])
+        ]
+
+        os.remove(audio_path)  # Clean up temp audio file
+
+        return transcript_data
+
+    except Exception as e:
+        logger.exception(f"Error fetching transcript with Whisper for video {video_id}: {str(e)}")
         return None
 
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {third_party_api_key}'  # Or 'X-API-KEY', 'api_key', etc., depending on the service
-    }
-    payload = {
-        'video_id': video_id,
-        'language': 'en'  # Request English transcript
-        # Add any other parameters required by your chosen third-party API
-    }
-
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Attempting to fetch transcript for {video_id} from third-party API (Attempt {attempt + 1}).")
-            response = requests.post(third_party_api_endpoint, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
-
-            transcript_data = response.json()
-
-            # The structure of transcript_data will depend on your chosen API.
-            # Assume it returns a list of dictionaries like {'text': '...', 'start': float, 'duration': float}
-            # You may need to adapt this parsing based on the actual API response.
-            if isinstance(transcript_data, list) and all(
-                    'text' in item and 'start' in item for item in transcript_data):
-                logger.info(f"Successfully fetched transcript for {video_id} from third-party API.")
-                return transcript_data
-            else:
-                logger.error(f"Third-party API returned unexpected data structure for {video_id}: {transcript_data}")
-                return None
-
-        except requests.exceptions.Timeout:
-            logger.error(f"Timeout fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}).")
-        except requests.exceptions.ConnectionError as e:
-            logger.error(
-                f"Connection error fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}): {e}")
-        except HttpError as e:  # Catch HTTP errors from response.raise_for_status()
-            logger.error(
-                f"HTTP error fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}): {e.response.status_code} - {e.response.text}")
-        except Exception as e:
-            logger.exception(
-                f"Unexpected error fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}): {str(e)}")
-
-        # If an error occurred and it's not the last attempt, wait and retry
-        if attempt < max_retries - 1:
-            delay = initial_delay * (2 ** attempt)  # Exponential backoff
-            logger.info(f"Retrying third-party API transcript fetch for {video_id} in {delay} seconds...")
-            time.sleep(delay)
-        else:
-            logger.error(f"Failed to fetch transcript for {video_id} after {max_retries} attempts.")
-            return None  # Failed after all retries
-
-    return None  # Should not be reached, but for clarity
-
-
-# --- Caching Functions (adjusted call to fetch_transcript) ---
 
 def get_video_title_with_cache(video_id, youtube_api_key):
     if video_id in video_title_cache:
@@ -191,18 +165,17 @@ def get_video_title_with_cache(video_id, youtube_api_key):
         video_title_cache[video_id] = title
     return title
 
-
-def get_transcript_with_cache(video_id):  # Does NOT need youtube_api_key here
+def get_transcript_with_cache(video_id):
     if video_id in transcript_cache:
         logger.info(f"Cache hit for transcript: {video_id}")
         return transcript_cache[video_id]
 
-    # Call the new third-party API based fetcher
     transcript = fetch_transcript(video_id)
 
     if transcript:
         transcript_cache[video_id] = transcript
     return transcript
+
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
