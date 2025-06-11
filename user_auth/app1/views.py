@@ -50,11 +50,15 @@ from youtube_transcript_api._errors import (
 )
 
 
-import logging
+
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from youtube_transcript_api.formatters import TextFormatter
 import xml.etree.ElementTree as ET
-
+import os
+import uuid
+import yt_dlp
+import whisper
+import logging
 logger = logging.getLogger(__name__)
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
@@ -113,12 +117,17 @@ def fetch_video_title(video_id, youtube_api_key):
 # --- Transcript Fetching using a hypothetical Third-Party API ---
 
 
+
+
+
+
 def fetch_transcript(video_id):
     """
     Downloads YouTube audio using yt-dlp and transcribes it using OpenAI Whisper.
+    Uses the 'tiny' model for compatibility with t3.micro.
     """
     try:
-        # Create a unique filename
+        # Create a unique temporary file path
         unique_id = str(uuid.uuid4())
         audio_path = f"/tmp/{unique_id}.mp3"
 
@@ -131,23 +140,33 @@ def fetch_transcript(video_id):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'quiet': True
+            'quiet': True,
+            'noplaylist': True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
-        # Load Whisper model (you can change to "small", "medium" etc.)
-        model = whisper.load_model("base")
+        # Load Whisper model (use 'tiny' for low-memory instances)
+        logger.info("Loading Whisper model...")
+        model = whisper.load_model("tiny")
+
+        logger.info("Transcribing audio...")
         result = model.transcribe(audio_path)
 
-        # Format result to match expected transcript structure
+        # Format result to match expected structure
         transcript_data = [
-            {'text': seg['text'], 'start': seg['start'], 'duration': seg['end'] - seg['start']}
-            for seg in result.get('segments', [])
+            {
+                'text': segment['text'],
+                'start': segment['start'],
+                'duration': segment['end'] - segment['start']
+            }
+            for segment in result.get('segments', [])
         ]
 
-        os.remove(audio_path)  # Clean up temp audio file
+        # Clean up temp audio file
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
 
         return transcript_data
 
@@ -157,21 +176,28 @@ def fetch_transcript(video_id):
 
 
 def get_video_title_with_cache(video_id, youtube_api_key):
+    """
+    Gets the video title from YouTube API and caches the result.
+    """
     if video_id in video_title_cache:
         logger.info(f"Cache hit for video title: {video_id}")
         return video_title_cache[video_id]
+
     title = fetch_video_title(video_id, youtube_api_key)
     if title:
         video_title_cache[video_id] = title
     return title
 
+
 def get_transcript_with_cache(video_id):
+    """
+    Gets the transcript and caches the result.
+    """
     if video_id in transcript_cache:
         logger.info(f"Cache hit for transcript: {video_id}")
         return transcript_cache[video_id]
 
     transcript = fetch_transcript(video_id)
-
     if transcript:
         transcript_cache[video_id] = transcript
     return transcript
