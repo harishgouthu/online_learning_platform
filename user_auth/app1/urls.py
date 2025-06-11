@@ -4,7 +4,8 @@ from django.urls import path
 from .views import (CourseAPIView, AskQuestionAPIView, UserQaWatchedSessionsView, VideoAPIView,
                     AllUsersWatchedSessionsView, ClipTabAPIView, UserClipWatchedSessionsView,
                     CreateNotesAPIView,  GetNotesAPIView, CombinedDataAPIView, CreateSessionAPIView,
-                    VideoCourseUpdateView, YoutubeVideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView, CourseVideosAPIView)
+                    VideoCourseUpdateView, YoutubeVideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView,
+                    CourseVideosAPIView, YoutubeTranscriptView)
 
 urlpatterns = [
     path('courses/', CourseAPIView.as_view(), name='course-api'),
@@ -23,6 +24,7 @@ urlpatterns = [
 
     path('create-note/', CreateNotesAPIView.as_view(), name='create-note'), #post/get/del
     path('notes/<int:note_id>/', CreateNotesAPIView.as_view(), name='update-note'), #edit
+    path('youtube/transcript/', YoutubeTranscriptView.as_view(), name='youtube-transcript'),
 
 
     path('combined-api/', CombinedDataAPIView.as_view(), name='combinedapi'),#get/del

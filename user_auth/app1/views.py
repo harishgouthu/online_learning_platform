@@ -1,6 +1,7 @@
 
 import io
 import mimetypes
+from rest_framework import serializers
 from urllib.parse import urlparse, parse_qs
 from rest_framework.generics import UpdateAPIView
 import google.generativeai as genai
@@ -29,67 +30,182 @@ from .serializers import (
     CourseModelSerializer,
     VideoCourseUpdateSerializer,
     VideoSerializer,
-    CreateSessionSerializer
+    CreateSessionSerializer,
+    YoutubeTranscriptSerializer,
+    TimestampField,
 )
+
 from user_auth.pagination import PreserveQueryParamsPagination
+import re
+import logging
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable
+)
 
 
+import logging
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api.formatters import TextFormatter
+import xml.etree.ElementTree as ET
+
+logger = logging.getLogger(__name__)
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import (
+    NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
+)
 
 genai.configure(api_key=settings.GEMINI_API_KEY)
 YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
+# Caches for video titles and transcripts
+video_title_cache = {}
+transcript_cache = {}
 
 
 def extract_youtube_video_id(url):
+    """
+    Extracts the YouTube video ID from a given URL.
+    Supports standard watch URLs, shortened youtu.be links, embeds, and shorts.
+    """
     parsed_url = urlparse(url)
-    if 'youtu.be' in parsed_url.hostname:
+    hostname = parsed_url.hostname
+    if hostname is None:
+        return None
+    if 'youtu.be' in hostname:
         return parsed_url.path[1:]
-    elif 'youtube.com' in parsed_url.hostname:
+    elif 'youtube.com' in hostname:
         if parsed_url.path == '/watch':
             return parse_qs(parsed_url.query).get('v', [None])[0]
         elif parsed_url.path.startswith('/embed/'):
             return parsed_url.path.split('/embed/')[1]
+        elif parsed_url.path.startswith('/shorts/'):
+            return parsed_url.path.split('/shorts/')[1]
     return None
 
 
-def fetch_video_title(video_id):
-    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+def fetch_video_title(video_id, youtube_api_key):
+    """
+    Fetches the video title using the YouTube Data API.
+    This still works with an API key as it's a public read operation.
+    """
+    youtube = build('youtube', 'v3', developerKey=youtube_api_key)
     try:
         response = youtube.videos().list(part="snippet", id=video_id).execute()
-        if response['items']:
-            return response['items'][0]['snippet']['title']
+        items = response.get('items', [])
+        if items:
+            return items[0]['snippet']['title']
     except HttpError as e:
-        raise Exception(f"Failed to fetch video title: {str(e)}")
+        if e.resp.status == 403:
+            logger.error(f"YouTube API Quota exceeded or permission denied for video ID {video_id}: {str(e)}")
+        elif e.resp.status == 404:
+            logger.error(f"Video not found for ID {video_id}: {str(e)}")
+        else:
+            logger.error(f"HttpError for video ID {video_id}: {str(e)}")
     return None
 
 
-# Fetch transcript from YouTubeTranscriptApi
-def fetch_transcript(video_id):
-    try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+# --- Transcript Fetching using a hypothetical Third-Party API ---
 
+def fetch_transcript(video_id, max_retries=3, initial_delay=2):
+    """
+    Fetches the transcript for a YouTube video using a third-party API.
+    You will need to replace 'YOUR_THIRD_PARTY_API_ENDPOINT' and 'YOUR_THIRD_PARTY_API_KEY'
+    with actual values from the service you choose (e.g., Apify).
+
+    This function expects the third-party API to return data in a format
+    similar to: [{'text': '...', 'start': float, 'duration': float}, ...]
+    or you'll need to adapt the parsing logic inside.
+    """
+    third_party_api_endpoint = getattr(settings, 'THIRD_PARTY_TRANSCRIPT_API_ENDPOINT', None)
+    third_party_api_key = getattr(settings, 'THIRD_PARTY_TRANSCRIPT_API_KEY', None)
+
+    if not third_party_api_endpoint or not third_party_api_key:
+        logger.error(
+            "THIRD_PARTY_TRANSCRIPT_API_ENDPOINT or THIRD_PARTY_TRANSCRIPT_API_KEY is not configured in settings.")
+        return None
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {third_party_api_key}'  # Or 'X-API-KEY', 'api_key', etc., depending on the service
+    }
+    payload = {
+        'video_id': video_id,
+        'language': 'en'  # Request English transcript
+        # Add any other parameters required by your chosen third-party API
+    }
+
+    for attempt in range(max_retries):
         try:
-            transcript = transcript_list.find_transcript(['en'])
-            return transcript.fetch()
-        except:
-            pass
+            logger.info(f"Attempting to fetch transcript for {video_id} from third-party API (Attempt {attempt + 1}).")
+            response = requests.post(third_party_api_endpoint, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
 
-        for transcript in transcript_list:
-            try:
-                return transcript.fetch()
-            except:
-                continue
+            transcript_data = response.json()
 
-    except NoTranscriptFound:
-        return None
-    except Exception as e:
-        print(f"Error fetching transcript: {str(e)}")
-        return None
+            # The structure of transcript_data will depend on your chosen API.
+            # Assume it returns a list of dictionaries like {'text': '...', 'start': float, 'duration': float}
+            # You may need to adapt this parsing based on the actual API response.
+            if isinstance(transcript_data, list) and all(
+                    'text' in item and 'start' in item for item in transcript_data):
+                logger.info(f"Successfully fetched transcript for {video_id} from third-party API.")
+                return transcript_data
+            else:
+                logger.error(f"Third-party API returned unexpected data structure for {video_id}: {transcript_data}")
+                return None
 
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}).")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(
+                f"Connection error fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}): {e}")
+        except HttpError as e:  # Catch HTTP errors from response.raise_for_status()
+            logger.error(
+                f"HTTP error fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}): {e.response.status_code} - {e.response.text}")
+        except Exception as e:
+            logger.exception(
+                f"Unexpected error fetching transcript for {video_id} from third-party API (Attempt {attempt + 1}): {str(e)}")
+
+        # If an error occurred and it's not the last attempt, wait and retry
+        if attempt < max_retries - 1:
+            delay = initial_delay * (2 ** attempt)  # Exponential backoff
+            logger.info(f"Retrying third-party API transcript fetch for {video_id} in {delay} seconds...")
+            time.sleep(delay)
+        else:
+            logger.error(f"Failed to fetch transcript for {video_id} after {max_retries} attempts.")
+            return None  # Failed after all retries
+
+    return None  # Should not be reached, but for clarity
+
+
+# --- Caching Functions (adjusted call to fetch_transcript) ---
+
+def get_video_title_with_cache(video_id, youtube_api_key):
+    if video_id in video_title_cache:
+        logger.info(f"Cache hit for video title: {video_id}")
+        return video_title_cache[video_id]
+    title = fetch_video_title(video_id, youtube_api_key)
+    if title:
+        video_title_cache[video_id] = title
+    return title
+
+
+def get_transcript_with_cache(video_id):  # Does NOT need youtube_api_key here
+    if video_id in transcript_cache:
+        logger.info(f"Cache hit for transcript: {video_id}")
+        return transcript_cache[video_id]
+
+    # Call the new third-party API based fetcher
+    transcript = fetch_transcript(video_id)
+
+    if transcript:
+        transcript_cache[video_id] = transcript
+    return transcript
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
-
-
 
     def post(self, request):
         serializer = YoutubeSerializer(data=request.data)
@@ -106,34 +222,43 @@ class AskQuestionAPIView(APIView):
                     "message": "Invalid YouTube URL."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            video_title = fetch_video_title(video_id)
+            # Get YouTube API Key from settings for video title fetching
+            youtube_api_key = settings.YOUTUBE_API_KEY
+
+            # Pass youtube_api_key to fetch_video_title
+            video_title = get_video_title_with_cache(video_id, youtube_api_key)
+
             if not video_title:
                 return Response({
                     "success": False,
-                    "message": "Could not retrieve video title."
+                    "message": "Could not retrieve video title (check YouTube API key, video ID, or network)."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             video, _ = VideoModel.objects.get_or_create(
+                user=user,  # Ensure user is passed for creation/retrieval
                 youtube_video_id=video_id,
-                defaults={'video_title': video_title, 'video_url': video_url, 'user': user}
+                defaults={'video_title': video_title, 'video_url': video_url}
             )
 
             session, created = SessionModel.objects.get_or_create(user=user, video=video)
             session_status = "New session created" if created else "Session resumed"
 
-            full_transcript = fetch_transcript(video_id)
+            # Call the new third-party API based fetcher (no API key needed here for this call signature)
+            full_transcript = get_transcript_with_cache(video_id)
+
             if not full_transcript:
                 return Response({
                     "success": False,
-                    "message": "Transcript not available in English. Try with a video that has English subtitles."
+                    "message": "Transcript not available from third-party service (check API configuration or video availability)."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             start_range = max(0, time_stamp - 60)
             end_range = time_stamp + 60
 
             transcript_segment = " ".join([
-                entry.text for entry in full_transcript
-                if start_range <= entry.start <= end_range
+                # Access 'text' and 'start' using dictionary keys
+                entry['text'] for entry in full_transcript
+                if start_range <= entry['start'] <= end_range
             ])
 
             if not transcript_segment.strip():
@@ -186,8 +311,6 @@ class AskQuestionAPIView(APIView):
             "message": "Invalid input data.",
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
-
-
     def get(self, request):
         video_url = request.query_params.get('youtube_video_url')
         if not video_url:
@@ -561,6 +684,7 @@ class CreateNotesAPIView(APIView):
             'last_accessed_at': session.last_accessed_at,
             'is_active': session.is_active
         }
+
 
         return Response({
             "success": True,
@@ -1295,3 +1419,75 @@ class CreateSessionAPIView(APIView):
                 "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+
+
+
+class YoutubeTranscriptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = YoutubeTranscriptSerializer(data=request.data)
+        if serializer.is_valid():
+            user = request.user
+            video_url = serializer.validated_data['youtube_video_url']
+
+            video_id = extract_youtube_video_id(video_url)
+            if not video_id:
+                return Response({
+                    "success": False,
+                    "message": "Invalid YouTube URL."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            video_title = fetch_video_title(video_id)
+            if not video_title:
+                return Response({
+                    "success": False,
+                    "message": "Could not retrieve video title."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            video, _ = VideoModel.objects.get_or_create(
+                youtube_video_id=video_id,
+                defaults={'video_title': video_title, 'video_url': video_url, 'user': user}
+            )
+
+            session, created = SessionModel.objects.get_or_create(user=user, video=video)
+            session_status = "New session created" if created else "Session resumed"
+
+            full_transcript = fetch_transcript(video_id)
+            if not full_transcript:
+                return Response({
+                    "success": False,
+                    "message": "Transcript not available in English. Try with a video that has English subtitles."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            segment_duration = 300  # 5 minutes
+            segmented_transcripts = {}
+
+            for entry in full_transcript:
+                segment_start = int(entry.start // segment_duration) * segment_duration
+                if segment_start not in segmented_transcripts:
+                    segmented_transcripts[segment_start] = []
+                segmented_transcripts[segment_start].append(entry.text)
+
+            formatted_segments = {
+                f"{start // 60}m - {(start + segment_duration) // 60}m":
+                    " ".join(texts)
+                for start, texts in segmented_transcripts.items()
+            }
+
+            return Response({
+                "success": True,
+                "message": "Transcript split successfully.",
+                "video_title": video_title,
+                "video_url": video_url,
+                "session_id": session.id,
+                "session_status": session_status,
+                "transcript_segments": formatted_segments
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "success": False,
+            "message": "Invalid input data.",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)

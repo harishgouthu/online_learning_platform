@@ -2,11 +2,9 @@ from rest_framework import serializers
 from .models import CourseModel, VideoModel, SessionModel, NotesModel, ImageModel, QAModel, BookmarkModel
 from django.core.validators import FileExtensionValidator
 from rest_framework.exceptions import ValidationError
-import re
-
-# serializers.py
 from rest_framework import serializers
 import re
+
 
 
 class TimestampField(serializers.Field):
@@ -50,9 +48,13 @@ class TimestampField(serializers.Field):
                 f"Invalid timestamp. Use seconds, MM:SS, HH:MM:SS, or 1h30m30s. Error: {str(e)}"
             )
 
+    def to_representation(self, value):
+        return str(value)
+
 class YoutubeSerializer(serializers.Serializer):
     youtube_video_url = serializers.URLField()
     question = serializers.CharField()
+    # time_stamp = serializers.FloatField()
     time_stamp = TimestampField()
 class CreateNoteSerializer(serializers.Serializer):
     youtube_video_url = serializers.URLField()
@@ -157,6 +159,8 @@ class SessionModelSerializer(serializers.ModelSerializer):
 #     notes = serializers.CharField()
 #     time_stamp = serializers.FloatField()
 
+class YoutubeTranscriptSerializer(serializers.Serializer):
+    youtube_video_url = serializers.URLField()
 
 
 class NotesModelSerializer(serializers.ModelSerializer):
