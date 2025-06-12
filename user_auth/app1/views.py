@@ -1,23 +1,39 @@
-
+import os
 import io
+import re
+import uuid
+import logging
 import mimetypes
-from rest_framework import serializers
+import xml.etree.ElementTree as ET
+
 from urllib.parse import urlparse, parse_qs
-from rest_framework.generics import UpdateAPIView
+from PIL import Image
+
+import yt_dlp
+import whisper
 import google.generativeai as genai
-from django.conf import settings
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from PIL import Image
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable,
+)
+from youtube_transcript_api.formatters import TextFormatter
+
+from django.conf import settings
+from django.shortcuts import get_object_or_404
+from django.db.models import Q
+
 from rest_framework import status, permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import NoTranscriptFound
-from django.shortcuts import get_object_or_404
-from rest_framework.generics import ListAPIView
-from django.db.models import Q
+from rest_framework.generics import ListAPIView, UpdateAPIView
+
+from user_auth.pagination import PreserveQueryParamsPagination
+
 from .models import ImageModel, NotesModel, QAModel, SessionModel, VideoModel, CourseModel
 from .serializers import (
     YoutubeSerializer,
@@ -34,49 +50,20 @@ from .serializers import (
     YoutubeTranscriptSerializer,
     TimestampField,
 )
-import os
-import whisper
-import yt_dlp
-import uuid
-from user_auth.pagination import PreserveQueryParamsPagination
-import re
-import logging
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    VideoUnavailable
-)
 
-
-
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-from youtube_transcript_api.formatters import TextFormatter
-import xml.etree.ElementTree as ET
-import os
-import uuid
-import yt_dlp
-import whisper
-import logging
-logger = logging.getLogger(__name__)
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import (
-    NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
-)
-
+# Gemini API configuration
 genai.configure(api_key=settings.GEMINI_API_KEY)
 YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
+
 # Caches for video titles and transcripts
 video_title_cache = {}
 transcript_cache = {}
 
+# Logger setup
+logger = logging.getLogger(__name__)
+
 
 def extract_youtube_video_id(url):
-    """
-    Extracts the YouTube video ID from a given URL.
-    Supports standard watch URLs, shortened youtu.be links, embeds, and shorts.
-    """
     parsed_url = urlparse(url)
     hostname = parsed_url.hostname
     if hostname is None:
@@ -92,46 +79,33 @@ def extract_youtube_video_id(url):
             return parsed_url.path.split('/shorts/')[1]
     return None
 
-
 def fetch_video_title(video_id, youtube_api_key):
-    """
-    Fetches the video title using the YouTube Data API.
-    This still works with an API key as it's a public read operation.
-    """
-    youtube = build('youtube', 'v3', developerKey=youtube_api_key)
     try:
+        youtube = build('youtube', 'v3', developerKey=youtube_api_key)
         response = youtube.videos().list(part="snippet", id=video_id).execute()
         items = response.get('items', [])
         if items:
             return items[0]['snippet']['title']
     except HttpError as e:
-        if e.resp.status == 403:
-            logger.error(f"YouTube API Quota exceeded or permission denied for video ID {video_id}: {str(e)}")
-        elif e.resp.status == 404:
-            logger.error(f"Video not found for ID {video_id}: {str(e)}")
-        else:
-            logger.error(f"HttpError for video ID {video_id}: {str(e)}")
+        logger.error(f"YouTube API error for video {video_id}: {e}")
     return None
 
-
-# --- Transcript Fetching using a hypothetical Third-Party API ---
-
-
-
-
-
-
-def fetch_transcript(video_id):
-    """
-    Downloads YouTube audio using yt-dlp and transcribes it using OpenAI Whisper.
-    Uses the 'tiny' model for compatibility with t3.micro.
-    """
+def fetch_transcript_from_youtube(video_id):
     try:
-        # Create a unique temporary file path
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return [
+            {'text': entry['text'], 'start': entry['start'], 'duration': entry['duration']}
+            for entry in transcript
+        ]
+    except (TranscriptsDisabled, NoTranscriptFound, Exception) as e:
+        logger.warning(f"YouTubeTranscriptApi failed for video {video_id}: {e}")
+        return None
+
+def fetch_transcript_using_whisper(video_id):
+    try:
         unique_id = str(uuid.uuid4())
         audio_path = f"/tmp/{unique_id}.mp3"
 
-        # Download audio using yt-dlp
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': audio_path,
@@ -147,40 +121,37 @@ def fetch_transcript(video_id):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
-        # Load Whisper model (use 'tiny' for low-memory instances)
-        logger.info("Loading Whisper model...")
         model = whisper.load_model("tiny")
-
-        logger.info("Transcribing audio...")
         result = model.transcribe(audio_path)
 
-        # Format result to match expected structure
-        transcript_data = [
-            {
-                'text': segment['text'],
-                'start': segment['start'],
-                'duration': segment['end'] - segment['start']
-            }
-            for segment in result.get('segments', [])
-        ]
-
-        # Clean up temp audio file
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-        return transcript_data
-
+        return [
+            {'text': seg['text'], 'start': seg['start'], 'duration': seg['end'] - seg['start']}
+            for seg in result.get('segments', [])
+        ]
     except Exception as e:
-        logger.exception(f"Error fetching transcript with Whisper for video {video_id}: {str(e)}")
+        logger.exception(f"Whisper transcription failed for {video_id}: {e}")
         return None
 
+def get_transcript_with_cache(video_id):
+    if video_id in transcript_cache:
+        return transcript_cache[video_id]
+
+    # Try YouTubeTranscriptApi first
+    transcript = fetch_transcript_from_youtube(video_id)
+    if not transcript:
+        # Fallback to Whisper
+        transcript = fetch_transcript_using_whisper(video_id)
+
+    if transcript:
+        transcript_cache[video_id] = transcript
+
+    return transcript
 
 def get_video_title_with_cache(video_id, youtube_api_key):
-    """
-    Gets the video title from YouTube API and caches the result.
-    """
     if video_id in video_title_cache:
-        logger.info(f"Cache hit for video title: {video_id}")
         return video_title_cache[video_id]
 
     title = fetch_video_title(video_id, youtube_api_key)
@@ -188,128 +159,110 @@ def get_video_title_with_cache(video_id, youtube_api_key):
         video_title_cache[video_id] = title
     return title
 
-
-def get_transcript_with_cache(video_id):
-    """
-    Gets the transcript and caches the result.
-    """
-    if video_id in transcript_cache:
-        logger.info(f"Cache hit for transcript: {video_id}")
-        return transcript_cache[video_id]
-
-    transcript = fetch_transcript(video_id)
-    if transcript:
-        transcript_cache[video_id] = transcript
-    return transcript
-
+# --- API View ---
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         serializer = YoutubeSerializer(data=request.data)
-        if serializer.is_valid():
-            user = request.user
-            video_url = serializer.validated_data['youtube_video_url']
-            question = serializer.validated_data['question']
-            time_stamp = serializer.validated_data['time_stamp']
-
-            video_id = extract_youtube_video_id(video_url)
-            if not video_id:
-                return Response({
-                    "success": False,
-                    "message": "Invalid YouTube URL."
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # Get YouTube API Key from settings for video title fetching
-            youtube_api_key = settings.YOUTUBE_API_KEY
-
-            # Pass youtube_api_key to fetch_video_title
-            video_title = get_video_title_with_cache(video_id, youtube_api_key)
-
-            if not video_title:
-                return Response({
-                    "success": False,
-                    "message": "Could not retrieve video title (check YouTube API key, video ID, or network)."
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            video, _ = VideoModel.objects.get_or_create(
-                user=user,  # Ensure user is passed for creation/retrieval
-                youtube_video_id=video_id,
-                defaults={'video_title': video_title, 'video_url': video_url}
-            )
-
-            session, created = SessionModel.objects.get_or_create(user=user, video=video)
-            session_status = "New session created" if created else "Session resumed"
-
-            # Call the new third-party API based fetcher (no API key needed here for this call signature)
-            full_transcript = get_transcript_with_cache(video_id)
-
-            if not full_transcript:
-                return Response({
-                    "success": False,
-                    "message": "Transcript not available from third-party service (check API configuration or video availability)."
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            start_range = max(0, time_stamp - 60)
-            end_range = time_stamp + 60
-
-            transcript_segment = " ".join([
-                # Access 'text' and 'start' using dictionary keys
-                entry['text'] for entry in full_transcript
-                if start_range <= entry['start'] <= end_range
-            ])
-
-            if not transcript_segment.strip():
-                return Response({
-                    "success": False,
-                    "message": "No transcript data found near the timestamp."
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            prompt = (
-                f"You are a helpful assistant. Based only on the following segment of a YouTube video transcript, "
-                f"which is from around timestamp {time_stamp} seconds, answer the user's question.\n\n"
-                f"Transcript Segment:\n{transcript_segment}\n\n"
-                f"Question: {question}\nAnswer:"
-            )
-
-            try:
-                model = genai.GenerativeModel('gemini-1.5-pro')
-                response = model.generate_content(prompt)
-                answer = response.text.strip()
-            except Exception as e:
-                return Response({
-                    "success": False,
-                    "message": f"Gemini API failed: {str(e)}"
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            qa = QAModel.objects.create(
-                session=session,
-                question=question,
-                answer=answer,
-                time_stamp=time_stamp
-            )
-
+        if not serializer.is_valid():
             return Response({
-                "success": True,
-                "message": "Q&A created successfully.",
-                "data": {
-                    'id': qa.id,
-                    'question': qa.question,
-                    'answer': qa.answer,
-                    'transcript_segment': transcript_segment,
-                    'session': session.id,
-                    'session_status': session_status,
-                    'time_stamp': qa.time_stamp,
-                    'created_at': qa.created_at
-                }
-            }, status=status.HTTP_201_CREATED)
+                "success": False,
+                "message": "Invalid input data.",
+                "errors": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        video_url = serializer.validated_data['youtube_video_url']
+        question = serializer.validated_data['question']
+        time_stamp = serializer.validated_data['time_stamp']
+
+        video_id = extract_youtube_video_id(video_url)
+        if not video_id:
+            return Response({
+                "success": False,
+                "message": "Invalid YouTube URL."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        youtube_api_key = settings.YOUTUBE_API_KEY
+        video_title = get_video_title_with_cache(video_id, youtube_api_key)
+
+        if not video_title:
+            return Response({
+                "success": False,
+                "message": "Could not retrieve video title."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        video, _ = VideoModel.objects.get_or_create(
+            user=user,
+            youtube_video_id=video_id,
+            defaults={'video_title': video_title, 'video_url': video_url}
+        )
+
+        session, created = SessionModel.objects.get_or_create(user=user, video=video)
+        session_status = "New session created" if created else "Session resumed"
+
+        full_transcript = get_transcript_with_cache(video_id)
+        if not full_transcript:
+            return Response({
+                "success": False,
+                "message": "Transcript not available."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        start_range = max(0, time_stamp - 60)
+        end_range = time_stamp + 60
+
+        transcript_segment = " ".join([
+            entry['text'] for entry in full_transcript
+            if start_range <= entry['start'] <= end_range
+        ])
+
+        if not transcript_segment.strip():
+            return Response({
+                "success": False,
+                "message": "No transcript data found near the timestamp."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        prompt = (
+            f"You are a helpful assistant. Based only on the following segment of a YouTube video transcript, "
+            f"which is from around timestamp {time_stamp} seconds, answer the user's question.\n\n"
+            f"Transcript Segment:\n{transcript_segment}\n\n"
+            f"Question: {question}\nAnswer:"
+        )
+
+        try:
+            model = genai.GenerativeModel('gemini-1.5-pro')
+            response = model.generate_content(prompt)
+            answer = response.text.strip()
+        except Exception as e:
+            return Response({
+                "success": False,
+                "message": f"Gemini API failed: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        qa = QAModel.objects.create(
+            session=session,
+            question=question,
+            answer=answer,
+            time_stamp=time_stamp
+        )
 
         return Response({
-            "success": False,
-            "message": "Invalid input data.",
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
+            "success": True,
+            "message": "Q&A created successfully.",
+            "data": {
+                'id': qa.id,
+                'question': qa.question,
+                'answer': qa.answer,
+                'transcript_segment': transcript_segment,
+                'session': session.id,
+                'session_status': session_status,
+                'time_stamp': qa.time_stamp,
+                'created_at': qa.created_at
+            }
+        }, status=status.HTTP_201_CREATED)
+
     def get(self, request):
         video_url = request.query_params.get('youtube_video_url')
         if not video_url:
