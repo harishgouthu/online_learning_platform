@@ -1,16 +1,8 @@
 import os
 import io
-import re
-import uuid
-import logging
-import mimetypes
-import xml.etree.ElementTree as ET
 
 from urllib.parse import urlparse, parse_qs
 from PIL import Image
-
-import yt_dlp
-import whisper
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -218,14 +210,14 @@ class AskQuestionAPIView(APIView):
         else:
             # Fallback prompt if no transcript available at all
             prompt = (
-                f"You are a helpful assistant. Based on the video title and URL below, try your best to answer the user's question. "
-                f"You don't have the transcript, so infer what you can from the metadata.\n\n"
+                f"You are a helpful assistant. The user has a question about a YouTube video, but no transcript is available. "
+                f"Based on the video title and context, do your best to help them. You can infer the possible content of the video based on the title and typical structure of such videos.\n\n"
                 f"Video Title: {video_title}\n"
                 f"Video URL: {video_url}\n"
-                f"Timestamp: {time_stamp} seconds\n\n"
-                f"Question: {question}\nAnswer:"
+                f"Timestamp (seconds): {time_stamp}\n"
+                f"User's Question: {question}\n\n"
+                f"Answer:"
             )
-
         try:
             model = genai.GenerativeModel('gemini-1.5-pro')
             response = model.generate_content(prompt)
