@@ -51,6 +51,32 @@ from .serializers import (
     TimestampField,
 )
 
+import traceback
+import logging
+import requests
+from xml.etree.ElementTree import ParseError
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._api import TranscriptListFetcher
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable
+)
+
+# ✅ Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Optional: write logs to a file
+file_handler = logging.FileHandler('transcript_api.log')
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 # Gemini API configuration
 genai.configure(api_key=settings.GEMINI_API_KEY)
 YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
@@ -101,54 +127,16 @@ def fetch_transcript_from_youtube(video_id):
         logger.warning(f"YouTubeTranscriptApi failed for video {video_id}: {e}")
         return None
 
-def fetch_transcript_using_whisper(video_id):
-    try:
-        unique_id = str(uuid.uuid4())
-        audio_path = f"/tmp/{unique_id}.mp3"
-
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': audio_path,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-            'noplaylist': True
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-
-        model = whisper.load_model("tiny")
-        result = model.transcribe(audio_path)
-
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-
-        return [
-            {'text': seg['text'], 'start': seg['start'], 'duration': seg['end'] - seg['start']}
-            for seg in result.get('segments', [])
-        ]
-    except Exception as e:
-        logger.exception(f"Whisper transcription failed for {video_id}: {e}")
-        return None
-
 def get_transcript_with_cache(video_id):
     if video_id in transcript_cache:
         return transcript_cache[video_id]
 
-    # Try YouTubeTranscriptApi first
     transcript = fetch_transcript_from_youtube(video_id)
-    if not transcript:
-        # Fallback to Whisper
-        transcript = fetch_transcript_using_whisper(video_id)
-
     if transcript:
         transcript_cache[video_id] = transcript
 
     return transcript
+
 
 def get_video_title_with_cache(video_id, youtube_api_key):
     if video_id in video_title_cache:
@@ -204,32 +192,39 @@ class AskQuestionAPIView(APIView):
         session_status = "New session created" if created else "Session resumed"
 
         full_transcript = get_transcript_with_cache(video_id)
-        if not full_transcript:
-            return Response({
-                "success": False,
-                "message": "Transcript not available."
-            }, status=status.HTTP_400_BAD_REQUEST)
 
-        start_range = max(0, time_stamp - 60)
-        end_range = time_stamp + 60
+        if full_transcript:
+            start_range = max(0, time_stamp - 60)
+            end_range = time_stamp + 60
 
-        transcript_segment = " ".join([
-            entry['text'] for entry in full_transcript
-            if start_range <= entry['start'] <= end_range
-        ])
+            transcript_segment = " ".join([
+                entry['text'] for entry in full_transcript
+                if start_range <= entry['start'] <= end_range
+            ])
 
-        if not transcript_segment.strip():
-            return Response({
-                "success": False,
-                "message": "No transcript data found near the timestamp."
-            }, status=status.HTTP_400_BAD_REQUEST)
+            if not transcript_segment.strip():
+                return Response({
+                    "success": False,
+                    "message": "No transcript data found near the timestamp."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        prompt = (
-            f"You are a helpful assistant. Based only on the following segment of a YouTube video transcript, "
-            f"which is from around timestamp {time_stamp} seconds, answer the user's question.\n\n"
-            f"Transcript Segment:\n{transcript_segment}\n\n"
-            f"Question: {question}\nAnswer:"
-        )
+            prompt = (
+                f"You are a helpful assistant. Based only on the following segment of a YouTube video transcript, "
+                f"which is from around timestamp {time_stamp} seconds, answer the user's question.\n\n"
+                f"Transcript Segment:\n{transcript_segment}\n\n"
+                f"Question: {question}\nAnswer:"
+            )
+
+        else:
+            # Fallback prompt if no transcript available at all
+            prompt = (
+                f"You are a helpful assistant. Based on the video title and URL below, try your best to answer the user's question. "
+                f"You don't have the transcript, so infer what you can from the metadata.\n\n"
+                f"Video Title: {video_title}\n"
+                f"Video URL: {video_url}\n"
+                f"Timestamp: {time_stamp} seconds\n\n"
+                f"Question: {question}\nAnswer:"
+            )
 
         try:
             model = genai.GenerativeModel('gemini-1.5-pro')
@@ -255,7 +250,7 @@ class AskQuestionAPIView(APIView):
                 'id': qa.id,
                 'question': qa.question,
                 'answer': qa.answer,
-                'transcript_segment': transcript_segment,
+                'transcript_segment': transcript_segment if full_transcript else "Transcript not available.",
                 'session': session.id,
                 'session_status': session_status,
                 'time_stamp': qa.time_stamp,
@@ -352,6 +347,81 @@ class AskQuestionAPIView(APIView):
             }, status=status.HTTP_404_NOT_FOUND)
 
 
+class DebugTranscriptListFetcher(TranscriptListFetcher):
+    def _get(self, url):
+        logger.debug(f"Fetching URL: {url}")
+        response = requests.get(url, headers=self._headers)
+        logger.debug(f"Status code: {response.status_code}")
+        logger.debug(f"Raw response (first 500 chars): {response.text[:500]}")  # See the raw XML
+        return response.text
+
+
+# ✅ Patch headers and monkey patch fetcher
+def patch_youtube_headers():
+    try:
+        DebugTranscriptListFetcher._TranscriptListFetcher__DEFAULT_HEADERS = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        import youtube_transcript_api._api
+        youtube_transcript_api._api.TranscriptListFetcher = DebugTranscriptListFetcher
+        logger.info("Patched YouTube headers successfully.")
+    except Exception as e:
+        logger.error("Header patch failed: %s", str(e))
+
+
+class TestYouTubeAPIView(APIView):
+    def get(self, request, video_id):
+        logger.info(f"Transcript request received for video_id: {video_id}")
+        try:
+            patch_youtube_headers()
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            logger.info("Transcript list fetched successfully.")
+
+            available = [
+                {
+                    "language": t.language,
+                    "language_code": t.language_code,
+                    "generated": t.is_generated
+                }
+                for t in transcript_list
+            ]
+            logger.debug(f"Available transcripts: {available}")
+
+            try:
+                transcript = transcript_list.find_manually_created_transcript(['en']).fetch()
+                logger.info("Manually created English transcript fetched.")
+            except (ParseError, Exception) as e:
+                logger.warning("Manual transcript fetch failed: %s", str(e))
+                try:
+                    transcript = transcript_list.find_generated_transcript(['en']).fetch()
+                    logger.info("Generated English transcript fetched.")
+                except (ParseError, Exception) as e:
+                    logger.error("Generated transcript fetch also failed: %s", str(e))
+                    return Response({"error": "Transcript fetch failed (empty or invalid response from YouTube)."},
+                                    status=status.HTTP_502_BAD_GATEWAY)
+
+            return Response({
+                "available_transcripts": available,
+                "transcript": transcript
+            }, status=status.HTTP_200_OK)
+
+        except TranscriptsDisabled:
+            logger.warning("Transcripts are disabled for this video.")
+            return Response({"error": "Transcripts are disabled for this video."}, status=status.HTTP_403_FORBIDDEN)
+        except NoTranscriptFound:
+            logger.warning("No transcript found for this video.")
+            return Response({"error": "No transcript found for this video."}, status=status.HTTP_404_NOT_FOUND)
+        except VideoUnavailable:
+            logger.warning("Video is unavailable.")
+            return Response({"error": "Video is unavailable."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error("Unhandled error: %s", traceback.format_exc())
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ClipTabAPIView(APIView):
     permission_classes = [IsAuthenticated]
