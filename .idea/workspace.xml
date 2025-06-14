@@ -9,6 +9,8 @@
       <change beforePath="$PROJECT_DIR$/user_auth/.env" beforeDir="false" afterPath="$PROJECT_DIR$/user_auth/.env" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/user_auth/app1/views.py" beforeDir="false" afterPath="$PROJECT_DIR$/user_auth/app1/views.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/user_auth/db.sqlite3" beforeDir="false" afterPath="$PROJECT_DIR$/user_auth/db.sqlite3" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/user_auth/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/user_auth/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/user_auth/user_auth/settings.py" beforeDir="false" afterPath="$PROJECT_DIR$/user_auth/user_auth/settings.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

@@ -1,16 +1,22 @@
 import os
 import io
-
+import logging
+import traceback
+import requests
+from xml.etree.ElementTree import ParseError
 from urllib.parse import urlparse, parse_qs
+from xml.etree.ElementTree import ParseError
 from PIL import Image
+
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
     NoTranscriptFound,
-    VideoUnavailable,
+    VideoUnavailable
 )
 from youtube_transcript_api.formatters import TextFormatter
 
@@ -23,9 +29,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView, UpdateAPIView
+from youtube_transcript_api._api import TranscriptListFetcher
 
 from user_auth.pagination import PreserveQueryParamsPagination
-
 from .models import ImageModel, NotesModel, QAModel, SessionModel, VideoModel, CourseModel
 from .serializers import (
     YoutubeSerializer,
@@ -43,42 +49,27 @@ from .serializers import (
     TimestampField,
 )
 
-import traceback
-import logging
-import requests
-from xml.etree.ElementTree import ParseError
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._api import TranscriptListFetcher
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    VideoUnavailable
-)
-
-# ✅ Set up logging
+# ✅ Setup logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Optional: write logs to a file
-file_handler = logging.FileHandler('transcript_api.log')
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-# Gemini API configuration
+# Avoid adding multiple handlers if already set
+if not logger.handlers:
+    file_handler = logging.FileHandler('transcript_api.log')
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+# ✅ Configure Gemini API
 genai.configure(api_key=settings.GEMINI_API_KEY)
+
+# ✅ YouTube API Key
 YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
 
-# Caches for video titles and transcripts
+# ✅ In-memory caches
 video_title_cache = {}
 transcript_cache = {}
 
-# Logger setup
-logger = logging.getLogger(__name__)
 
 
 def extract_youtube_video_id(url):
@@ -108,16 +99,42 @@ def fetch_video_title(video_id, youtube_api_key):
         logger.error(f"YouTube API error for video {video_id}: {e}")
     return None
 
+
 def fetch_transcript_from_youtube(video_id):
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return [
-            {'text': entry['text'], 'start': entry['start'], 'duration': entry['duration']}
-            for entry in transcript
-        ]
-    except (TranscriptsDisabled, NoTranscriptFound, Exception) as e:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+    except NoTranscriptFound:
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB', 'en-US'])
+        except Exception as e:
+            logger.warning(f"Transcript still not found for video {video_id}: {e}")
+            return None
+    except Exception as e:
         logger.warning(f"YouTubeTranscriptApi failed for video {video_id}: {e}")
         return None
+
+    return [
+        {'text': entry['text'], 'start': entry['start'], 'duration': entry['duration']}
+        for entry in transcript
+    ]
+
+
+
+
+def get_transcript_languages(video_id):
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        return [
+            {
+                "language_code": transcript.language_code,
+                "language_name": transcript.language,
+                "is_generated": transcript.is_generated
+            }
+            for transcript in transcript_list
+        ]
+    except (TranscriptsDisabled, VideoUnavailable, Exception) as e:
+        logger.warning(f"Failed to list transcripts for video {video_id}: {e}")
+        return []
 
 def get_transcript_with_cache(video_id):
     if video_id in transcript_cache:
@@ -158,6 +175,9 @@ class AskQuestionAPIView(APIView):
         question = serializer.validated_data['question']
         time_stamp = serializer.validated_data['time_stamp']
 
+        # Optional: Normalize timestamp to int
+        time_stamp = int(time_stamp)
+
         video_id = extract_youtube_video_id(video_url)
         if not video_id:
             return Response({
@@ -184,6 +204,8 @@ class AskQuestionAPIView(APIView):
         session_status = "New session created" if created else "Session resumed"
 
         full_transcript = get_transcript_with_cache(video_id)
+        transcript_segment = ""
+        available_lang_names = []  # ✅ Ensure it's always defined
 
         if full_transcript:
             start_range = max(0, time_stamp - 60)
@@ -206,11 +228,13 @@ class AskQuestionAPIView(APIView):
                 f"Transcript Segment:\n{transcript_segment}\n\n"
                 f"Question: {question}\nAnswer:"
             )
-
         else:
-            # Fallback prompt if no transcript available at all
+            # Fetch available transcript languages
+            available_languages = get_transcript_languages(video_id)
+            available_lang_names = [lang["language_name"] for lang in available_languages]
+
             prompt = (
-                f"You are a helpful assistant. The user has a question about a YouTube video, but no transcript is available. "
+                f"You are a helpful assistant. The user has a question about a YouTube video, but no English transcript is available. "
                 f"Based on the video title and context, do your best to help them. You can infer the possible content of the video based on the title and typical structure of such videos.\n\n"
                 f"Video Title: {video_title}\n"
                 f"Video URL: {video_url}\n"
@@ -218,10 +242,16 @@ class AskQuestionAPIView(APIView):
                 f"User's Question: {question}\n\n"
                 f"Answer:"
             )
+
         try:
             model = genai.GenerativeModel('gemini-1.5-pro')
             response = model.generate_content(prompt)
-            answer = response.text.strip()
+            answer = getattr(response, "text", "").strip()
+            if not answer:
+                return Response({
+                    "success": False,
+                    "message": "Gemini API did not return a valid response."
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
             return Response({
                 "success": False,
@@ -246,7 +276,8 @@ class AskQuestionAPIView(APIView):
                 'session': session.id,
                 'session_status': session_status,
                 'time_stamp': qa.time_stamp,
-                'created_at': qa.created_at
+                'created_at': qa.created_at,
+                'available_transcript_languages': available_lang_names if not full_transcript else []
             }
         }, status=status.HTTP_201_CREATED)
 
@@ -384,22 +415,56 @@ class TestYouTubeAPIView(APIView):
             ]
             logger.debug(f"Available transcripts: {available}")
 
+            transcript = None
+
+            # Try manually created English transcript
             try:
                 transcript = transcript_list.find_manually_created_transcript(['en']).fetch()
                 logger.info("Manually created English transcript fetched.")
-            except (ParseError, Exception) as e:
-                logger.warning("Manual transcript fetch failed: %s", str(e))
-                try:
-                    transcript = transcript_list.find_generated_transcript(['en']).fetch()
-                    logger.info("Generated English transcript fetched.")
-                except (ParseError, Exception) as e:
-                    logger.error("Generated transcript fetch also failed: %s", str(e))
-                    return Response({"error": "Transcript fetch failed (empty or invalid response from YouTube)."},
-                                    status=status.HTTP_502_BAD_GATEWAY)
+            except Exception as e:
+                logger.warning("Manual 'en' transcript not found: %s", str(e))
+
+                # Fallback to en-GB, en-US, en-IN
+                for lang in ['en-GB', 'en-US', 'en-IN']:
+                    try:
+                        transcript = transcript_list.find_transcript([lang]).fetch()
+                        logger.info(f"Transcript fetched using fallback language: {lang}")
+                        break
+                    except Exception as fallback_error:
+                        logger.warning(f"Transcript fetch failed for fallback language '{lang}': {fallback_error}")
+
+                # Final fallback: first manually created transcript
+                # Final fallback: try all available transcripts (including generated ones)
+                if transcript is None:
+                    try:
+                        for t in transcript_list:
+                            try:
+                                data = t.fetch()
+                                if isinstance(data, list) and len(data) > 0:
+                                    transcript = data
+                                    logger.info(f"Fetched fallback transcript: {t.language_code}")
+                                    break
+                                else:
+                                    logger.warning(f"Empty transcript returned for: {t.language_code}")
+                            except ParseError as pe:
+                                logger.warning(f"Transcript parse error for {t.language_code}: {pe}")
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch transcript for {t.language_code}: {e}")
+                    except Exception as final_fallback_error:
+                        logger.error(f"Final fallback loop failed for video_id {video_id}: {final_fallback_error}")
+
+            # If still no transcript found
+            if transcript is None:
+                logger.error("All attempts to fetch transcript failed.")
+                return Response({
+                    "error": "Transcript fetch failed (empty or invalid response from YouTube)."
+                }, status=status.HTTP_502_BAD_GATEWAY)
 
             return Response({
                 "available_transcripts": available,
-                "transcript": transcript
+                "transcript": transcript,
+                "used_language_code": transcript_list.find_transcript([t['language_code'] for t in available if transcript]).language_code if transcript else None
+
             }, status=status.HTTP_200_OK)
 
         except TranscriptsDisabled:
@@ -414,6 +479,7 @@ class TestYouTubeAPIView(APIView):
         except Exception as e:
             logger.error("Unhandled error: %s", traceback.format_exc())
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class ClipTabAPIView(APIView):
     permission_classes = [IsAuthenticated]
