@@ -12,7 +12,7 @@ import webvtt
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-
+from django.core.cache import cache
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -24,7 +24,7 @@ from youtube_transcript_api.formatters import TextFormatter
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-
+from django.core.cache import cache
 from rest_framework import status, permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -64,13 +64,11 @@ if not logger.handlers:
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-# ✅ Configure Gemini API
+
 genai.configure(api_key=settings.GEMINI_API_KEY)
 
-# ✅ YouTube API Key
 YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
 
-# ✅ In-memory caches
 video_title_cache = {}
 transcript_cache = {}
 
@@ -195,22 +193,53 @@ def get_transcript_languages(video_id):
         logger.warning(f"Failed to list transcripts for video {video_id}: {e}")
         return []
 
+def get_transcript_languages_cached(video_id):
+    cache_key = f"transcript_languages:{video_id}"
+    languages = cache.get(cache_key)
+
+    if languages:
+        return languages
+
+    languages = get_transcript_languages(video_id)
+
+    if languages:
+        cache.set(cache_key, languages, timeout=60 * 60 * 24)
+
+    return languages
+
+# def get_transcript_with_cache(video_id):
+#     if video_id in transcript_cache:
+#         return transcript_cache[video_id]
+#
+#     # First attempt: YouTubeTranscriptApi
+#     transcript = fetch_transcript_with_ytdlp(video_id)
+#     # Fallback if API method fails
+#     if not transcript:
+#         transcript = fetch_transcript_from_youtube(video_id)
+#
+#     if transcript:
+#         transcript_cache[video_id] = transcript
+#
+#     return transcript
 
 def get_transcript_with_cache(video_id):
-    if video_id in transcript_cache:
-        return transcript_cache[video_id]
+    cache_key = f"transcript:{video_id}"
+    transcript = cache.get(cache_key)
 
-    # First attempt: YouTubeTranscriptApi
+    if transcript:
+        return transcript
+
     transcript = fetch_transcript_with_ytdlp(video_id)
-    # Fallback if API method fails
+
+
+    # Fallback to yt-dlp
     if not transcript:
         transcript = fetch_transcript_from_youtube(video_id)
 
     if transcript:
-        transcript_cache[video_id] = transcript
+        cache.set(cache_key, transcript, timeout=60 * 60 * 24)  # cache for 24 hours
 
     return transcript
-
 
 def fetch_video_title_via_api(video_id, youtube_api_key):
     try:
@@ -247,27 +276,47 @@ def fetch_video_title_via_ytdlp(video_id):
 
 
 # Hybrid function with caching
-def get_video_title_with_cache(video_id, youtube_api_key=None):
-    if video_id in video_title_cache:
-        return video_title_cache[video_id]
+# def get_video_title_with_cache(video_id, youtube_api_key=None):
+#     if video_id in video_title_cache:
+#         return video_title_cache[video_id]
+#
+#     title = None
+#
+#     # Step 1: Try YouTube API
+#     if youtube_api_key:
+#         title = fetch_video_title_via_api(video_id, youtube_api_key)
+#
+#     # Step 2: Fallback to yt-dlp if API fails
+#     if not title:
+#         title = fetch_video_title_via_ytdlp(video_id)
+#
+#     # Cache if success
+#     if title:
+#         video_title_cache[video_id] = title
+#
+#     return title
 
-    title = None
+
+
+def get_video_title_with_cache(video_id, youtube_api_key=None):
+    cache_key = f"video_title:{video_id}"
+    title = cache.get(cache_key)
+
+    if title:
+        return title
 
     # Step 1: Try YouTube API
     if youtube_api_key:
         title = fetch_video_title_via_api(video_id, youtube_api_key)
 
-    # Step 2: Fallback to yt-dlp if API fails
+    # Step 2: Fallback to yt-dlp
     if not title:
         title = fetch_video_title_via_ytdlp(video_id)
 
-    # Cache if success
     if title:
-        video_title_cache[video_id] = title
+        cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
 
     return title
-
-# --- API View ---
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -341,7 +390,7 @@ class AskQuestionAPIView(APIView):
             )
         else:
             # Fetch available transcript languages
-            available_languages = get_transcript_languages(video_id)
+            available_languages = get_transcript_languages_cached(video_id)
             available_lang_names = [lang["language_name"] for lang in available_languages]
 
             prompt = (
