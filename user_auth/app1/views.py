@@ -7,7 +7,8 @@ from xml.etree.ElementTree import ParseError
 from urllib.parse import urlparse, parse_qs
 from xml.etree.ElementTree import ParseError
 from PIL import Image
-
+import subprocess
+import webvtt
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -30,6 +31,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView, UpdateAPIView
 from youtube_transcript_api._api import TranscriptListFetcher
+from yt_dlp import YoutubeDL
+import webvtt
+import tempfile
 
 from user_auth.pagination import PreserveQueryParamsPagination
 from .models import ImageModel, NotesModel, QAModel, SessionModel, VideoModel, CourseModel
@@ -100,18 +104,20 @@ def fetch_video_title(video_id, youtube_api_key):
     return None
 
 
+
 def fetch_transcript_from_youtube(video_id):
     try:
+        # Primary: Try YouTubeTranscriptApi
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
     except NoTranscriptFound:
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB', 'en-US'])
         except Exception as e:
             logger.warning(f"Transcript still not found for video {video_id}: {e}")
-            return None
+            return fetch_transcript_with_ytdlp(video_id)  # Fallback to yt-dlp
     except Exception as e:
         logger.warning(f"YouTubeTranscriptApi failed for video {video_id}: {e}")
-        return None
+        return fetch_transcript_with_ytdlp(video_id)  # Fallback to yt-dlp
 
     return [
         {'text': entry['text'], 'start': entry['start'], 'duration': entry['duration']}
@@ -119,6 +125,59 @@ def fetch_transcript_from_youtube(video_id):
     ]
 
 
+
+
+def convert_to_seconds(hms_str):
+    """Convert HH:MM:SS.mmm to seconds (float)."""
+    h, m, s = hms_str.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+def fetch_transcript_with_ytdlp(video_id):
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    lang_options = ['en', 'en-US', 'en-GB']
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vtt_file = None
+
+            for lang in lang_options:
+                ydl_opts = {
+                    'skip_download': True,
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitleslangs': [lang],
+                    'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True,
+                }
+
+                with YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+
+                candidate = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
+                if os.path.exists(candidate):
+                    vtt_file = candidate
+                    break
+
+            if not vtt_file:
+                logger.warning(f"No subtitles found for video {video_id}")
+                return None
+
+            # Parse VTT file
+            transcript = [
+                {
+                    'text': caption.text.strip(),
+                    'start': convert_to_seconds(caption.start),
+                    'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
+                }
+                for caption in webvtt.read(vtt_file)
+            ]
+
+            return transcript
+
+    except Exception as e:
+        logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
+        return None
 
 
 def get_transcript_languages(video_id):
@@ -136,24 +195,76 @@ def get_transcript_languages(video_id):
         logger.warning(f"Failed to list transcripts for video {video_id}: {e}")
         return []
 
+
 def get_transcript_with_cache(video_id):
     if video_id in transcript_cache:
         return transcript_cache[video_id]
 
-    transcript = fetch_transcript_from_youtube(video_id)
+    # First attempt: YouTubeTranscriptApi
+    transcript = fetch_transcript_with_ytdlp(video_id)
+    # Fallback if API method fails
+    if not transcript:
+        transcript = fetch_transcript_from_youtube(video_id)
+
     if transcript:
         transcript_cache[video_id] = transcript
 
     return transcript
 
 
-def get_video_title_with_cache(video_id, youtube_api_key):
+def fetch_video_title_via_api(video_id, youtube_api_key):
+    try:
+        youtube = build('youtube', 'v3', developerKey=youtube_api_key)
+        response = youtube.videos().list(part="snippet", id=video_id).execute()
+        items = response.get('items', [])
+        if items:
+            return items[0]['snippet']['title']
+    except HttpError as e:
+        logger.warning(f"YouTube API error for video {video_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected error in YouTube API for video {video_id}: {e}")
+    return None
+
+
+
+def fetch_video_title_via_ytdlp(video_id):
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+        }
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info.get('title')
+
+    except Exception as e:
+        logger.error(f"Failed to fetch title for video {video_id}: {e}")
+        return None
+
+
+# Hybrid function with caching
+def get_video_title_with_cache(video_id, youtube_api_key=None):
     if video_id in video_title_cache:
         return video_title_cache[video_id]
 
-    title = fetch_video_title(video_id, youtube_api_key)
+    title = None
+
+    # Step 1: Try YouTube API
+    if youtube_api_key:
+        title = fetch_video_title_via_api(video_id, youtube_api_key)
+
+    # Step 2: Fallback to yt-dlp if API fails
+    if not title:
+        title = fetch_video_title_via_ytdlp(video_id)
+
+    # Cache if success
     if title:
         video_title_cache[video_id] = title
+
     return title
 
 # --- API View ---
