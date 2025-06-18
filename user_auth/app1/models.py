@@ -5,6 +5,19 @@ from django.utils import timezone
 from django.core.validators import FileExtensionValidator
 
 
+class TranscriptModel(models.Model):
+    youtube_video_id = models.CharField(max_length=20, unique=True)
+    language = models.CharField(max_length=10, default='en')
+    transcript_data = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)  # ✅ Add this line
+    transcript_text = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"Transcript for video ID {self.youtube_video_id}"
+
+
+
 class CourseModel(models.Model):
     course_name = models.CharField(max_length=255)
     user = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name='courses')

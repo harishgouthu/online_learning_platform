@@ -9,6 +9,7 @@ from xml.etree.ElementTree import ParseError
 from PIL import Image
 import subprocess
 import webvtt
+from langdetect import detect, LangDetectException
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -36,7 +37,7 @@ import webvtt
 import tempfile
 
 from user_auth.pagination import PreserveQueryParamsPagination
-from .models import ImageModel, NotesModel, QAModel, SessionModel, VideoModel, CourseModel
+from .models import ImageModel, NotesModel, QAModel, SessionModel, VideoModel, CourseModel, TranscriptModel
 from .serializers import (
     YoutubeSerializer,
     CreateNoteSerializer,
@@ -90,9 +91,9 @@ def extract_youtube_video_id(url):
             return parsed_url.path.split('/shorts/')[1]
     return None
 
-def fetch_video_title(video_id, youtube_api_key):
+def fetch_video_title(video_id):
     try:
-        youtube = build('youtube', 'v3', developerKey=youtube_api_key)
+        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
         response = youtube.videos().list(part="snippet", id=video_id).execute()
         items = response.get('items', [])
         if items:
@@ -102,6 +103,83 @@ def fetch_video_title(video_id, youtube_api_key):
     return None
 
 
+
+# def fetch_transcript_with_ytdlp(video_id):
+#     url = f"https://www.youtube.com/watch?v={video_id}"
+#     lang_options = ['en', 'en-US', 'en-GB']
+#
+#     try:
+#         with tempfile.TemporaryDirectory() as tmpdir:
+#             vtt_file = None
+#
+#             for lang in lang_options:
+#                 ydl_opts = {
+#                     'skip_download': True,
+#                     'writesubtitles': True,
+#                     'writeautomaticsub': True,
+#                     'subtitleslangs': [lang],
+#                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
+#                     'quiet': True,
+#                     'no_warnings': True,
+#                 }
+#
+#                 with YoutubeDL(ydl_opts) as ydl:
+#                     ydl.download([url])
+#
+#                 candidate = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
+#                 if os.path.exists(candidate):
+#                     vtt_file = candidate
+#                     break
+#
+#             if not vtt_file:
+#                 logger.warning(f"No subtitles found for video {video_id}")
+#                 return None
+#
+#             # Parse VTT file
+#             transcript = [
+#                 {
+#                     'text': caption.text.strip(),
+#                     'start': convert_to_seconds(caption.start),
+#                     'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
+#                 }
+#                 for caption in webvtt.read(vtt_file)
+#             ]
+#
+#             return transcript
+#
+#     except Exception as e:
+#         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
+#         return None
+
+
+def get_transcript_languages(video_id):
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        return [
+            {
+                "language_code": transcript.language_code,
+                "language_name": transcript.language,
+                "is_generated": transcript.is_generated
+            }
+            for transcript in transcript_list
+        ]
+    except (TranscriptsDisabled, VideoUnavailable, Exception) as e:
+        logger.warning(f"Failed to list transcripts for video {video_id}: {e}")
+        return []
+
+def get_transcript_languages_cached(video_id):
+    cache_key = f"transcript_languages:{video_id}"
+    languages = cache.get(cache_key)
+
+    if languages:
+        return languages
+
+    languages = get_transcript_languages(video_id)
+
+    if languages:
+        cache.set(cache_key, languages, timeout=60 * 60 * 24)
+
+    return languages
 
 def fetch_transcript_from_youtube(video_id):
     try:
@@ -177,43 +255,32 @@ def fetch_transcript_with_ytdlp(video_id):
         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
         return None
 
+def get_transcript_with_cache(video_id):
+    if video_id in transcript_cache:
+        return transcript_cache[video_id]
 
-def get_transcript_languages(video_id):
-    try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        return [
-            {
-                "language_code": transcript.language_code,
-                "language_name": transcript.language,
-                "is_generated": transcript.is_generated
-            }
-            for transcript in transcript_list
-        ]
-    except (TranscriptsDisabled, VideoUnavailable, Exception) as e:
-        logger.warning(f"Failed to list transcripts for video {video_id}: {e}")
-        return []
+    transcript = fetch_transcript_with_ytdlp(video_id)
 
-def get_transcript_languages_cached(video_id):
-    cache_key = f"transcript_languages:{video_id}"
-    languages = cache.get(cache_key)
+    if not transcript:
+        transcript = fetch_transcript_from_youtube(video_id)
 
-    if languages:
-        return languages
+    if transcript:
+        full_text = " ".join([seg['text'] for seg in transcript])
+        transcript_cache[video_id] = {
+            "segments": transcript,
+            "full_text": full_text
+        }
+        return transcript_cache[video_id]
 
-    languages = get_transcript_languages(video_id)
-
-    if languages:
-        cache.set(cache_key, languages, timeout=60 * 60 * 24)
-
-    return languages
+    return None
 
 # def get_transcript_with_cache(video_id):
 #     if video_id in transcript_cache:
 #         return transcript_cache[video_id]
 #
-#     # First attempt: YouTubeTranscriptApi
+#     # First attempt: YouTubeTranscriptAp
 #     transcript = fetch_transcript_with_ytdlp(video_id)
-#     # Fallback if API method fails
+#     # Fallback to yt-dlp if needed
 #     if not transcript:
 #         transcript = fetch_transcript_from_youtube(video_id)
 #
@@ -222,24 +289,24 @@ def get_transcript_languages_cached(video_id):
 #
 #     return transcript
 
-def get_transcript_with_cache(video_id):
-    cache_key = f"transcript:{video_id}"
-    transcript = cache.get(cache_key)
-
-    if transcript:
-        return transcript
-
-    transcript = fetch_transcript_with_ytdlp(video_id)
-
-
-    # Fallback to yt-dlp
-    if not transcript:
-        transcript = fetch_transcript_from_youtube(video_id)
-
-    if transcript:
-        cache.set(cache_key, transcript, timeout=60 * 60 * 24)  # cache for 24 hours
-
-    return transcript
+# def get_transcript_with_cache(video_id):
+#     cache_key = f"transcript:{video_id}"
+#     transcript = cache.get(cache_key)
+#
+#     if transcript:
+#         return transcript
+#
+#     transcript = fetch_transcript_with_ytdlp(video_id)
+#
+#
+#     # Fallback to yt-dlp
+#     if not transcript:
+#         transcript = fetch_transcript_from_youtube(video_id)
+#
+#     if transcript:
+#         cache.set(cache_key, transcript, timeout=60 * 60 * 24)  # cache for 24 hours
+#
+#     return transcript
 
 def fetch_video_title_via_api(video_id, youtube_api_key):
     try:
@@ -255,7 +322,7 @@ def fetch_video_title_via_api(video_id, youtube_api_key):
     return None
 
 
-
+#
 def fetch_video_title_via_ytdlp(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -275,48 +342,48 @@ def fetch_video_title_via_ytdlp(video_id):
         return None
 
 
-# Hybrid function with caching
-# def get_video_title_with_cache(video_id, youtube_api_key=None):
-#     if video_id in video_title_cache:
-#         return video_title_cache[video_id]
-#
-#     title = None
-#
-#     # Step 1: Try YouTube API
-#     if youtube_api_key:
-#         title = fetch_video_title_via_api(video_id, youtube_api_key)
-#
-#     # Step 2: Fallback to yt-dlp if API fails
-#     if not title:
-#         title = fetch_video_title_via_ytdlp(video_id)
-#
-#     # Cache if success
-#     if title:
-#         video_title_cache[video_id] = title
-#
-#     return title
-
-
 
 def get_video_title_with_cache(video_id, youtube_api_key=None):
-    cache_key = f"video_title:{video_id}"
-    title = cache.get(cache_key)
+    if video_id in video_title_cache:
+        return video_title_cache[video_id]
 
-    if title:
-        return title
+    title = None
 
     # Step 1: Try YouTube API
     if youtube_api_key:
         title = fetch_video_title_via_api(video_id, youtube_api_key)
 
-    # Step 2: Fallback to yt-dlp
+    # Step 2: Fallback to yt-dlp if API fails
     if not title:
         title = fetch_video_title_via_ytdlp(video_id)
 
+    # Cache if success
     if title:
-        cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
+        video_title_cache[video_id] = title
 
     return title
+
+
+#
+# def get_video_title_with_cache(video_id, youtube_api_key=None):
+#     cache_key = f"video_title:{video_id}"
+#     title = cache.get(cache_key)
+#
+#     if title:
+#         return title
+#
+#     # Step 1: Try YouTube API
+#     if youtube_api_key:
+#         title = fetch_video_title_via_api(video_id, youtube_api_key)
+#
+#     # Step 2: Fallback to yt-dlp
+#     if not title:
+#         title = fetch_video_title_via_ytdlp(video_id)
+#
+#     if title:
+#         cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
+#
+#     return title
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -363,8 +430,42 @@ class AskQuestionAPIView(APIView):
         session, created = SessionModel.objects.get_or_create(user=user, video=video)
         session_status = "New session created" if created else "Session resumed"
 
-        full_transcript = get_transcript_with_cache(video_id)
-        transcript_segment = ""
+        # Transcript lookup from DB first
+        # transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
+        # full_transcript = transcript_obj.transcript_data if transcript_obj else None
+        # available_lang_names = []  # Ensure defined
+        #
+        # # If not found in DB, fallback to fetching and caching
+        # if not full_transcript:
+        #     transcript_data = get_transcript_with_cache(video_id)
+        #     full_transcript = transcript_data.get("segments") if transcript_data else None
+        #
+        #     if full_transcript:
+        #         TranscriptModel.objects.create(
+        #             youtube_video_id=video_id,
+        #             language='en',
+        #             transcript_data=full_transcript,
+        #             transcript_text=transcript_data.get("full_text", "")
+        #         )
+        # Track where the transcript came from
+        transcript_source = "model"  # default assumption
+
+        transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
+        full_transcript = transcript_obj.transcript_data if transcript_obj else None
+
+        if not full_transcript:
+            transcript_data = get_transcript_with_cache(video_id)
+            full_transcript = transcript_data.get("segments") if transcript_data else None
+
+            if full_transcript:
+                TranscriptModel.objects.create(
+                    youtube_video_id=video_id,
+                    language='en',
+                    transcript_data=full_transcript,
+                    transcript_text=transcript_data.get("full_text", "")
+                )
+                transcript_source = "fetched"  # updated since it was freshly fetched
+
         available_lang_names = []  # ✅ Ensure it's always defined
 
         if full_transcript:
@@ -424,7 +525,6 @@ class AskQuestionAPIView(APIView):
             answer=answer,
             time_stamp=time_stamp
         )
-
         return Response({
             "success": True,
             "message": "Q&A created successfully.",
@@ -437,9 +537,28 @@ class AskQuestionAPIView(APIView):
                 'session_status': session_status,
                 'time_stamp': qa.time_stamp,
                 'created_at': qa.created_at,
+                'transcript_source': transcript_source,  # <-- add this
                 'available_transcript_languages': available_lang_names if not full_transcript else []
             }
         }, status=status.HTTP_201_CREATED)
+
+        # return Response({
+        #     "success": True,
+        #     "message": "Q&A created successfully.",
+        #     "data": {
+        #         'id': qa.id,
+        #         'question': qa.question,
+        #         'answer': qa.answer,
+        #         'transcript_segment': transcript_segment if full_transcript else "Transcript not available.",
+        #         'session': session.id,
+        #         'session_status': session_status,
+        #         'time_stamp': qa.time_stamp,
+        #         'created_at': qa.created_at,
+        #         'available_transcript_languages': available_lang_names if not full_transcript else []
+        #     }
+        # }, status=status.HTTP_201_CREATED)
+
+
 
     def get(self, request):
         video_url = request.query_params.get('youtube_video_url')
@@ -675,7 +794,7 @@ class ClipTabAPIView(APIView):
                 "message": "Invalid YouTube URL."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        video_title = fetch_video_title(video_id)
+        video_title = get_video_title_with_cache(video_id)
         if not video_title:
             return Response({
                 "success": False,
@@ -841,7 +960,7 @@ class CreateNotesAPIView(APIView):
                 "message": "Invalid YouTube URL. Please enter a valid video link."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        video_title = fetch_video_title(video_id)
+        video_title = get_video_title_with_cache(video_id)
         if not video_title:
             return Response({
                 "success": False,
@@ -1160,8 +1279,179 @@ class CourseAPIView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
+# class VideoAPIView(APIView):
+#     permission_classes = [IsAuthenticated]
+#
+#     def post(self, request):
+#         video_url = request.data.get('youtube_video_url')
+#         if not video_url:
+#             return Response(
+#                 {"status": "error", "message": "youtube_video_url is required."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+#
+#         video_id = extract_youtube_video_id(video_url)
+#         if not video_id:
+#             return Response(
+#                 {"status": "error", "message": "Invalid YouTube URL. Please provide a valid link."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+#
+#         video_title = request.data.get('video_title')
+#         if not video_title:
+#             video_title = get_video_title_with_cache(video_id)
+#             if not video_title:
+#                 return Response(
+#                     {"status": "error", "message": "Unable to fetch video title. Please try again later."},
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+#
+#         try:
+#             video, video_created = VideoModel.objects.update_or_create(
+#                 youtube_video_id=video_id,
+#                 defaults={
+#                     'video_title': video_title,
+#                     'video_url': video_url,
+#                     'user': request.user
+#                 }
+#             )
+#
+#             session, session_created = SessionModel.objects.get_or_create(
+#                 user=request.user,
+#                 video=video,
+#                 defaults={
+#                     'is_active': True,
+#                     'total_watch_time': 0
+#                 }
+#             )
+#
+#             if not session_created:
+#                 session.is_active = True
+#                 session.save(update_fields=['is_active', 'last_accessed_at'])
+#
+#             return Response({
+#                 "status": "success",
+#                 "message": "Video saved successfully." if video_created else "Video updated successfully.",
+#                 "video": VideoSerializer(video).data,
+#                 "session": {
+#                     "id": session.id,
+#                     "is_active": session.is_active,
+#                     "total_watch_time": session.total_watch_time,
+#                     "last_accessed_at": session.last_accessed_at,
+#                     "created_at": session.created_at
+#                 },
+#                 "status_flags": {
+#                     "video_created": video_created,
+#                     "session_created": session_created,
+#                     "session_reactivated": not session_created and session.is_active
+#                 }
+#             }, status=status.HTTP_201_CREATED if video_created else status.HTTP_200_OK)
+#
+#         except Exception as e:
+#             return Response({
+#                 "status": "error",
+#                 "message": "Failed to save video.",
+#                 "error": str(e)
+#             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
 class VideoAPIView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        video_url = request.data.get('youtube_video_url')
+        if not video_url:
+            return Response(
+                {"status": "error", "message": "youtube_video_url is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        video_id = extract_youtube_video_id(video_url)
+        if not video_id:
+            return Response(
+                {"status": "error", "message": "Invalid YouTube URL. Please provide a valid link."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        video_title = request.data.get('video_title') or get_video_title_with_cache(video_id)
+        if not video_title:
+            return Response(
+                {"status": "error", "message": "Unable to fetch video title. Please try again later."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # Create or update video
+            video, video_created = VideoModel.objects.update_or_create(
+                youtube_video_id=video_id,
+                defaults={
+                    'video_title': video_title,
+                    'video_url': video_url,
+                    'user': request.user
+                }
+            )
+
+            # Create or reactivate session
+            session, session_created = SessionModel.objects.get_or_create(
+                user=request.user,
+                video=video,
+                defaults={
+                    'is_active': True,
+                    'total_watch_time': 0
+                }
+            )
+
+            if not session_created:
+                session.is_active = True
+                session.save(update_fields=['is_active', 'last_accessed_at'])
+
+            # Transcript logic
+            transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
+            transcript_created = False
+
+            if not transcript_obj:
+                transcript_data = get_transcript_with_cache(video_id)
+                if transcript_data:
+                    transcript_obj, transcript_created = TranscriptModel.objects.get_or_create(
+                        youtube_video_id=video_id,
+                        defaults={
+                            'language': 'en',
+                            'transcript_data': transcript_data.get("segments", []),
+                            'transcript_text': transcript_data.get("full_text", "")
+                        }
+                    )
+
+            return Response({
+                "status": "success",
+                "message": "Video saved successfully." if video_created else "Video updated successfully.",
+                "video": VideoSerializer(video).data,
+                "session": {
+                    "id": session.id,
+                    "is_active": session.is_active,
+                    "total_watch_time": session.total_watch_time,
+                    "last_accessed_at": session.last_accessed_at,
+                    "created_at": session.created_at
+                },
+                "transcript": {
+                    "segments": transcript_obj.transcript_data if transcript_obj else [],
+                    "full_text": transcript_obj.transcript_text if transcript_obj else ""
+                },
+                "status_flags": {
+                    "video_created": video_created,
+                    "session_created": session_created,
+                    "session_reactivated": not session_created and session.is_active,
+                    "transcript_created": transcript_created
+                }
+            }, status=status.HTTP_201_CREATED if video_created else status.HTTP_200_OK)
+
+
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": "Failed to save video.",
+                "error": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def get(self, request):
         try:
@@ -1184,78 +1474,6 @@ class VideoAPIView(APIView):
                 "message": "Failed to retrieve videos.",
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-
-    def post(self, request):
-        video_url = request.data.get('youtube_video_url')
-        if not video_url:
-            return Response(
-                {"status": "error", "message": "youtube_video_url is required."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        video_id = extract_youtube_video_id(video_url)
-        if not video_id:
-            return Response(
-                {"status": "error", "message": "Invalid YouTube URL. Please provide a valid link."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        video_title = request.data.get('video_title')
-        if not video_title:
-            video_title = fetch_video_title(video_id)
-            if not video_title:
-                return Response(
-                    {"status": "error", "message": "Unable to fetch video title. Please try again later."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        try:
-            video, video_created = VideoModel.objects.update_or_create(
-                youtube_video_id=video_id,
-                defaults={
-                    'video_title': video_title,
-                    'video_url': video_url,
-                    'user': request.user
-                }
-            )
-
-            session, session_created = SessionModel.objects.get_or_create(
-                user=request.user,
-                video=video,
-                defaults={
-                    'is_active': True,
-                    'total_watch_time': 0
-                }
-            )
-
-            if not session_created:
-                session.is_active = True
-                session.save(update_fields=['is_active', 'last_accessed_at'])
-
-            return Response({
-                "status": "success",
-                "message": "Video saved successfully." if video_created else "Video updated successfully.",
-                "video": VideoSerializer(video).data,
-                "session": {
-                    "id": session.id,
-                    "is_active": session.is_active,
-                    "total_watch_time": session.total_watch_time,
-                    "last_accessed_at": session.last_accessed_at,
-                    "created_at": session.created_at
-                },
-                "status_flags": {
-                    "video_created": video_created,
-                    "session_created": session_created,
-                    "session_reactivated": not session_created and session.is_active
-                }
-            }, status=status.HTTP_201_CREATED if video_created else status.HTTP_200_OK)
-
-        except Exception as e:
-            return Response({
-                "status": "error",
-                "message": "Failed to save video.",
-                "error": str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def delete(self, request):
         if video_id := request.query_params.get('id'):
@@ -1626,7 +1844,6 @@ class CreateSessionAPIView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Get or create the video
             video, _ = VideoModel.objects.get_or_create(
                 youtube_video_id=video_id,
                 defaults={
@@ -1679,7 +1896,7 @@ class YoutubeTranscriptView(APIView):
                     "message": "Invalid YouTube URL."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            video_title = fetch_video_title(video_id)
+            video_title = get_video_title_with_cache(video_id)
             if not video_title:
                 return Response({
                     "success": False,
@@ -1694,7 +1911,7 @@ class YoutubeTranscriptView(APIView):
             session, created = SessionModel.objects.get_or_create(user=user, video=video)
             session_status = "New session created" if created else "Session resumed"
 
-            full_transcript = fetch_transcript(video_id)
+            full_transcript = get_transcript_with_cache(video_id)
             if not full_transcript:
                 return Response({
                     "success": False,
@@ -1704,11 +1921,12 @@ class YoutubeTranscriptView(APIView):
             segment_duration = 300  # 5 minutes
             segmented_transcripts = {}
 
+
             for entry in full_transcript:
-                segment_start = int(entry.start // segment_duration) * segment_duration
+                segment_start = int(entry['start'] // segment_duration) * segment_duration
                 if segment_start not in segmented_transcripts:
                     segmented_transcripts[segment_start] = []
-                segmented_transcripts[segment_start].append(entry.text)
+                segmented_transcripts[segment_start].append(entry['text'])
 
             formatted_segments = {
                 f"{start // 60}m - {(start + segment_duration) // 60}m":
