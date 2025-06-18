@@ -1880,6 +1880,75 @@ class CreateSessionAPIView(APIView):
 
 
 
+# class YoutubeTranscriptView(APIView):
+#     permission_classes = [IsAuthenticated]
+#
+#     def post(self, request):
+#         serializer = YoutubeTranscriptSerializer(data=request.data)
+#         if serializer.is_valid():
+#             user = request.user
+#             video_url = serializer.validated_data['youtube_video_url']
+#
+#             video_id = extract_youtube_video_id(video_url)
+#             if not video_id:
+#                 return Response({
+#                     "success": False,
+#                     "message": "Invalid YouTube URL."
+#                 }, status=status.HTTP_400_BAD_REQUEST)
+#
+#             video_title = get_video_title_with_cache(video_id)
+#             if not video_title:
+#                 return Response({
+#                     "success": False,
+#                     "message": "Could not retrieve video title."
+#                 }, status=status.HTTP_400_BAD_REQUEST)
+#
+#             video, _ = VideoModel.objects.get_or_create(
+#                 youtube_video_id=video_id,
+#                 defaults={'video_title': video_title, 'video_url': video_url, 'user': user}
+#             )
+#
+#             session, created = SessionModel.objects.get_or_create(user=user, video=video)
+#             session_status = "New session created" if created else "Session resumed"
+#
+#             full_transcript = get_transcript_with_cache(video_id)
+#             if not full_transcript:
+#                 return Response({
+#                     "success": False,
+#                     "message": "Transcript not available in English. Try with a video that has English subtitles."
+#                 }, status=status.HTTP_400_BAD_REQUEST)
+#
+#             segment_duration = 300  # 5 minutes
+#             segmented_transcripts = {}
+#
+#
+#             for entry in full_transcript:
+#                 segment_start = int(entry['start'] // segment_duration) * segment_duration
+#                 if segment_start not in segmented_transcripts:
+#                     segmented_transcripts[segment_start] = []
+#                 segmented_transcripts[segment_start].append(entry['text'])
+#
+#             formatted_segments = {
+#                 f"{start // 60}m - {(start + segment_duration) // 60}m":
+#                     " ".join(texts)
+#                 for start, texts in segmented_transcripts.items()
+#             }
+#
+#             return Response({
+#                 "success": True,
+#                 "message": "Transcript split successfully.",
+#                 "video_title": video_title,
+#                 "video_url": video_url,
+#                 "session_id": session.id,
+#                 "session_status": session_status,
+#                 "transcript_segments": formatted_segments
+#             }, status=status.HTTP_200_OK)
+#
+#         return Response({
+#             "success": False,
+#             "message": "Invalid input data.",
+#             "errors": serializer.errors
+#         }, status=status.HTTP_400_BAD_REQUEST)
 class YoutubeTranscriptView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1911,16 +1980,34 @@ class YoutubeTranscriptView(APIView):
             session, created = SessionModel.objects.get_or_create(user=user, video=video)
             session_status = "New session created" if created else "Session resumed"
 
-            full_transcript = get_transcript_with_cache(video_id)
+            # 🟨 Try fetching from DB cache (TranscriptModel)
+            transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
+            full_transcript = transcript_obj.transcript_data if transcript_obj else None
+            transcript_source = "database"
+
+            if not full_transcript:
+                # 🟧 Fallback to yt-dlp or YouTube fetch logic
+                transcript_data = get_transcript_with_cache(video_id)
+                full_transcript = transcript_data.get("segments") if transcript_data else None
+                transcript_source = "fetched"
+
+                if full_transcript:
+                    TranscriptModel.objects.create(
+                        youtube_video_id=video_id,
+                        language='en',
+                        transcript_data=full_transcript,
+                        transcript_text=transcript_data.get("full_text", "")
+                    )
+
             if not full_transcript:
                 return Response({
                     "success": False,
                     "message": "Transcript not available in English. Try with a video that has English subtitles."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            # ✅ Segmenting the transcript
             segment_duration = 300  # 5 minutes
             segmented_transcripts = {}
-
 
             for entry in full_transcript:
                 segment_start = int(entry['start'] // segment_duration) * segment_duration
@@ -1936,12 +2023,13 @@ class YoutubeTranscriptView(APIView):
 
             return Response({
                 "success": True,
-                "message": "Transcript split successfully.",
+                "message": f"Transcript split successfully from {transcript_source}.",
                 "video_title": video_title,
                 "video_url": video_url,
                 "session_id": session.id,
                 "session_status": session_status,
-                "transcript_segments": formatted_segments
+                "transcript_segments": formatted_segments,
+                "transcript_source": transcript_source  # 🆕 Show where it came from
             }, status=status.HTTP_200_OK)
 
         return Response({
