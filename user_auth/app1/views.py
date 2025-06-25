@@ -335,47 +335,47 @@ def fetch_video_title_via_ytdlp(video_id):
 
 
 
-def get_video_title_with_cache(video_id, youtube_api_key=None):
-    if video_id in video_title_cache:
-        return video_title_cache[video_id]
-
-    title = None
-
-    # Step 1: Try YouTube API
-    if youtube_api_key:
-        title = fetch_video_title_via_api(video_id, youtube_api_key)
-
-    # Step 2: Fallback to yt-dlp if API fails
-    if not title:
-        title = fetch_video_title_via_ytdlp(video_id)
-
-    # Cache if success
-    if title:
-        video_title_cache[video_id] = title
-
-    return title
-
-
-#
 # def get_video_title_with_cache(video_id, youtube_api_key=None):
-#     cache_key = f"video_title:{video_id}"
-#     title = cache.get(cache_key)
+#     if video_id in video_title_cache:
+#         return video_title_cache[video_id]
 #
-#     if title:
-#         return title
+#     title = None
 #
 #     # Step 1: Try YouTube API
 #     if youtube_api_key:
 #         title = fetch_video_title_via_api(video_id, youtube_api_key)
 #
-#     # Step 2: Fallback to yt-dlp
+#     # Step 2: Fallback to yt-dlp if API fails
 #     if not title:
 #         title = fetch_video_title_via_ytdlp(video_id)
 #
+#     # Cache if success
 #     if title:
-#         cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
+#         video_title_cache[video_id] = title
 #
 #     return title
+
+
+#
+def get_video_title_with_cache(video_id, youtube_api_key=None):
+    cache_key = f"video_title:{video_id}"
+    title = cache.get(cache_key)
+
+    if title:
+        return title
+
+    # Step 1: Try YouTube API
+    if youtube_api_key:
+        title = fetch_video_title_via_api(video_id, youtube_api_key)
+
+    # Step 2: Fallback to yt-dlp
+    if not title:
+        title = fetch_video_title_via_ytdlp(video_id)
+
+    if title:
+        cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
+
+    return title
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
