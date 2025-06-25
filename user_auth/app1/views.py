@@ -103,55 +103,6 @@ def fetch_video_title(video_id):
     return None
 
 
-
-# def fetch_transcript_with_ytdlp(video_id):
-#     url = f"https://www.youtube.com/watch?v={video_id}"
-#     lang_options = ['en', 'en-US', 'en-GB']
-#
-#     try:
-#         with tempfile.TemporaryDirectory() as tmpdir:
-#             vtt_file = None
-#
-#             for lang in lang_options:
-#                 ydl_opts = {
-#                     'skip_download': True,
-#                     'writesubtitles': True,
-#                     'writeautomaticsub': True,
-#                     'subtitleslangs': [lang],
-#                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
-#                     'quiet': True,
-#                     'no_warnings': True,
-#                 }
-#
-#                 with YoutubeDL(ydl_opts) as ydl:
-#                     ydl.download([url])
-#
-#                 candidate = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
-#                 if os.path.exists(candidate):
-#                     vtt_file = candidate
-#                     break
-#
-#             if not vtt_file:
-#                 logger.warning(f"No subtitles found for video {video_id}")
-#                 return None
-#
-#             # Parse VTT file
-#             transcript = [
-#                 {
-#                     'text': caption.text.strip(),
-#                     'start': convert_to_seconds(caption.start),
-#                     'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
-#                 }
-#                 for caption in webvtt.read(vtt_file)
-#             ]
-#
-#             return transcript
-#
-#     except Exception as e:
-#         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
-#         return None
-
-
 def get_transcript_languages(video_id):
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -274,7 +225,6 @@ def fetch_transcript_with_ytdlp(video_id):
 #
 #     return None
 
-from django.core.cache import cache
 
 def get_transcript_with_cache(video_id):
     cache_key = f"transcript:{video_id}"
@@ -1476,10 +1426,6 @@ class VideoAPIView(APIView):
                     "last_accessed_at": session.last_accessed_at,
                     "created_at": session.created_at
                 },
-                "transcript": {
-                    "segments": transcript_obj.transcript_data if transcript_obj else [],
-                    "full_text": transcript_obj.transcript_text if transcript_obj else ""
-                },
                 "status_flags": {
                     "video_created": video_created,
                     "session_created": session_created,
@@ -1646,73 +1592,6 @@ class YoutubeVideoCourseUpdateView(APIView):
             "message": "Update failed. Please correct the highlighted fields.",
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
-
-
-
-# class CourseVideoListView(ListAPIView):
-#     serializer_class = VideoSerializer
-#     permission_classes = [IsAuthenticated]
-#     pagination_class = PreserveQueryParamsPagination
-#
-#     def get_queryset(self):
-#         self.search_term = self.request.query_params.get('course_name', '').strip().lower()
-#         self.user = self.request.user
-#
-#         if not self.search_term:
-#             return VideoModel.objects.none()
-#
-#         base_queryset = VideoModel.objects.filter(user=self.user, course__isnull=False)
-#
-#         self.exact_match_exists = base_queryset.filter(
-#             course__course_name__iexact=self.search_term
-#         ).exists()
-#
-#         if self.exact_match_exists:
-#             return base_queryset.filter(
-#                 course__course_name__iexact=self.search_term
-#             ).order_by('-last_accessed_at')
-#         else:
-#             return base_queryset.filter(
-#                 course__course_name__icontains=self.search_term
-#             ).order_by('-last_accessed_at')
-#
-#     def list(self, request, *args, **kwargs):
-#         queryset = self.get_queryset()
-#         # print("QuerySet count:", queryset.count())
-#
-#         if not self.search_term:
-#             return Response(
-#                 {"error": "Please provide a valid 'course_name' query parameter."},
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-#
-#         if not queryset.exists():
-#             return Response(
-#                 {"message": f"No videos found for course name: '{self.search_term}'"},
-#                 status=status.HTTP_404_NOT_FOUND
-#             )
-#
-#         page = self.paginate_queryset(queryset)
-#         print("Page:", page)  # Should NOT be None if pagination works
-#
-#         if page is not None:
-#             serializer = self.get_serializer(page, many=True)
-#             response = self.get_paginated_response(serializer.data)
-#         else:
-#             serializer = self.get_serializer(queryset, many=True)
-#             response = Response(serializer.data, status=status.HTTP_200_OK)
-#
-#         match_message = (
-#             f"Exact match found for course name: '{self.search_term}'"
-#             if self.exact_match_exists else
-#             f"No exact match. Showing partial matches for: '{self.search_term}'"
-#         )
-#
-#         if isinstance(response.data, dict):
-#             response.data['message'] = match_message
-#             response.data['count'] = len(serializer.data)
-#
-#         return response
 
 
 class CourseVideoListView(ListAPIView):
@@ -1919,79 +1798,6 @@ class CreateSessionAPIView(APIView):
                 "details": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
-
-
-
-# class YoutubeTranscriptView(APIView):
-#     permission_classes = [IsAuthenticated]
-#
-#     def post(self, request):
-#         serializer = YoutubeTranscriptSerializer(data=request.data)
-#         if serializer.is_valid():
-#             user = request.user
-#             video_url = serializer.validated_data['youtube_video_url']
-#
-#             video_id = extract_youtube_video_id(video_url)
-#             if not video_id:
-#                 return Response({
-#                     "success": False,
-#                     "message": "Invalid YouTube URL."
-#                 }, status=status.HTTP_400_BAD_REQUEST)
-#
-#             video_title = get_video_title_with_cache(video_id)
-#             if not video_title:
-#                 return Response({
-#                     "success": False,
-#                     "message": "Could not retrieve video title."
-#                 }, status=status.HTTP_400_BAD_REQUEST)
-#
-#             video, _ = VideoModel.objects.get_or_create(
-#                 youtube_video_id=video_id,
-#                 defaults={'video_title': video_title, 'video_url': video_url, 'user': user}
-#             )
-#
-#             session, created = SessionModel.objects.get_or_create(user=user, video=video)
-#             session_status = "New session created" if created else "Session resumed"
-#
-#             full_transcript = get_transcript_with_cache(video_id)
-#             if not full_transcript:
-#                 return Response({
-#                     "success": False,
-#                     "message": "Transcript not available in English. Try with a video that has English subtitles."
-#                 }, status=status.HTTP_400_BAD_REQUEST)
-#
-#             segment_duration = 300  # 5 minutes
-#             segmented_transcripts = {}
-#
-#
-#             for entry in full_transcript:
-#                 segment_start = int(entry['start'] // segment_duration) * segment_duration
-#                 if segment_start not in segmented_transcripts:
-#                     segmented_transcripts[segment_start] = []
-#                 segmented_transcripts[segment_start].append(entry['text'])
-#
-#             formatted_segments = {
-#                 f"{start // 60}m - {(start + segment_duration) // 60}m":
-#                     " ".join(texts)
-#                 for start, texts in segmented_transcripts.items()
-#             }
-#
-#             return Response({
-#                 "success": True,
-#                 "message": "Transcript split successfully.",
-#                 "video_title": video_title,
-#                 "video_url": video_url,
-#                 "session_id": session.id,
-#                 "session_status": session_status,
-#                 "transcript_segments": formatted_segments
-#             }, status=status.HTTP_200_OK)
-#
-#         return Response({
-#             "success": False,
-#             "message": "Invalid input data.",
-#             "errors": serializer.errors
-#         }, status=status.HTTP_400_BAD_REQUEST)
 class YoutubeTranscriptView(APIView):
     permission_classes = [IsAuthenticated]
 
