@@ -21,7 +21,7 @@ from youtube_transcript_api import (
     VideoUnavailable
 )
 from youtube_transcript_api.formatters import TextFormatter
-
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
@@ -73,7 +73,7 @@ YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
 video_title_cache = {}
 transcript_cache = {}
 
-
+COOKIES_FILE = "/home/ubuntu/cookies.txt"
 
 def extract_youtube_video_id(url):
     parsed_url = urlparse(url)
@@ -159,6 +159,10 @@ def convert_to_seconds(hms_str):
     h, m, s = hms_str.split(":")
     return int(h) * 3600 + int(m) * 60 + float(s)
 
+
+
+
+
 def fetch_transcript_with_ytdlp(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
     lang_options = ['en', 'en-US', 'en-GB']
@@ -176,6 +180,7 @@ def fetch_transcript_with_ytdlp(video_id):
                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
                     'quiet': True,
                     'no_warnings': True,
+                    'cookiefile': COOKIES_FILE,
                 }
 
                 with YoutubeDL(ydl_opts) as ydl:
@@ -190,7 +195,6 @@ def fetch_transcript_with_ytdlp(video_id):
                 logger.warning(f"No subtitles found for video {video_id}")
                 return None
 
-            # Parse VTT file
             transcript = [
                 {
                     'text': caption.text.strip(),
@@ -205,6 +209,103 @@ def fetch_transcript_with_ytdlp(video_id):
     except Exception as e:
         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
         return None
+
+
+def fetch_transcript_from_youtube(video_id):
+    # Fallback: use YouTubeTranscriptApi (you should import and handle errors)
+
+
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return [
+            {
+                "text": segment["text"],
+                "start": segment["start"],
+                "duration": segment["duration"]
+            }
+            for segment in transcript
+        ]
+    except (TranscriptsDisabled, NoTranscriptFound) as e:
+        logger.warning(f"Transcript not available via API for {video_id}: {e}")
+    except Exception as e:
+        logger.error(f"API transcript failed for {video_id}: {e}")
+    return None
+
+
+def get_transcript_with_cache(video_id):
+    cache_key = f"transcript:{video_id}"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        logger.info(f"Cache hit for transcript: {video_id}")
+        return cached_data
+
+    # First attempt yt-dlp
+    transcript = fetch_transcript_with_ytdlp(video_id)
+
+    # Fallback to YouTubeTranscriptApi if yt-dlp fails
+    if not transcript:
+        transcript = fetch_transcript_from_youtube(video_id)
+
+    if transcript:
+        full_text = " ".join([seg['text'] for seg in transcript])
+        transcript_data = {
+            "segments": transcript,
+            "full_text": full_text
+        }
+        cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)  # 24 hours
+        logger.info(f"Transcript cached for {video_id}")
+        return transcript_data
+
+    logger.warning(f"No transcript found for {video_id}")
+    return None
+
+# def fetch_transcript_with_ytdlp(video_id):
+#     url = f"https://www.youtube.com/watch?v={video_id}"
+#     lang_options = ['en', 'en-US', 'en-GB']
+#
+#     try:
+#         with tempfile.TemporaryDirectory() as tmpdir:
+#             vtt_file = None
+#
+#             for lang in lang_options:
+#                 ydl_opts = {
+#                     'skip_download': True,
+#                     'writesubtitles': True,
+#                     'writeautomaticsub': True,
+#                     'subtitleslangs': [lang],
+#                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
+#                     'quiet': True,
+#                     'no_warnings': True,
+#                 }
+#
+#                 with YoutubeDL(ydl_opts) as ydl:
+#                     ydl.download([url])
+#
+#                 candidate = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
+#                 if os.path.exists(candidate):
+#                     vtt_file = candidate
+#                     break
+#
+#             if not vtt_file:
+#                 logger.warning(f"No subtitles found for video {video_id}")
+#                 return None
+#
+#             # Parse VTT file
+#             transcript = [
+#                 {
+#                     'text': caption.text.strip(),
+#                     'start': convert_to_seconds(caption.start),
+#                     'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
+#                 }
+#                 for caption in webvtt.read(vtt_file)
+#             ]
+#
+#             return transcript
+#
+#     except Exception as e:
+#         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
+#         return None
 
 # def get_transcript_with_cache(video_id):
 #     if video_id in transcript_cache:
@@ -226,29 +327,29 @@ def fetch_transcript_with_ytdlp(video_id):
 #     return None
 
 
-def get_transcript_with_cache(video_id):
-    cache_key = f"transcript:{video_id}"
-    cached_data = cache.get(cache_key)
-
-    if cached_data:
-        return cached_data
-
-    transcript = fetch_transcript_with_ytdlp(video_id)
-
-    if not transcript:
-        transcript = fetch_transcript_from_youtube(video_id)
-
-    if transcript:
-        full_text = " ".join([seg['text'] for seg in transcript])
-        transcript_data = {
-            "segments": transcript,
-            "full_text": full_text
-        }
-        # Cache it in Redis for 24 hours (86400 seconds)
-        cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)
-        return transcript_data
-
-    return None
+# def get_transcript_with_cache(video_id):
+#     cache_key = f"transcript:{video_id}"
+#     cached_data = cache.get(cache_key)
+#
+#     if cached_data:
+#         return cached_data
+#
+#     transcript = fetch_transcript_with_ytdlp(video_id)
+#
+#     if not transcript:
+#         transcript = fetch_transcript_from_youtube(video_id)
+#
+#     if transcript:
+#         full_text = " ".join([seg['text'] for seg in transcript])
+#         transcript_data = {
+#             "segments": transcript,
+#             "full_text": full_text
+#         }
+#         # Cache it in Redis for 24 hours (86400 seconds)
+#         cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)
+#         return transcript_data
+#
+#     return None
 
 def fetch_video_title_via_api(video_id, youtube_api_key):
     try:
@@ -265,23 +366,23 @@ def fetch_video_title_via_api(video_id, youtube_api_key):
 
 
 #
-def fetch_video_title_via_ytdlp(video_id):
-    url = f"https://www.youtube.com/watch?v={video_id}"
-
-    try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-        }
-
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return info.get('title')
-
-    except Exception as e:
-        logger.error(f"Failed to fetch title for video {video_id}: {e}")
-        return None
+# def fetch_video_title_via_ytdlp(video_id):
+#     url = f"https://www.youtube.com/watch?v={video_id}"
+#
+#     try:
+#         ydl_opts = {
+#             'quiet': True,
+#             'no_warnings': True,
+#             'skip_download': True,
+#         }
+#
+#         with YoutubeDL(ydl_opts) as ydl:
+#             info = ydl.extract_info(url, download=False)
+#             return info.get('title')
+#
+#     except Exception as e:
+#         logger.error(f"Failed to fetch title for video {video_id}: {e}")
+#         return None
 
 
 
@@ -326,6 +427,26 @@ def get_video_title_with_cache(video_id, youtube_api_key=None):
         cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
 
     return title
+def fetch_video_title_via_ytdlp(video_id):
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    COOKIES_FILE = "/home/ubuntu/cookies.txt"  # Path to your cookies
+
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            # Optional: use cookies only if required
+            'cookiefile': COOKIES_FILE,
+        }
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info.get('title')
+
+    except Exception as e:
+        logger.error(f"Failed to fetch title for video {video_id}: {e}")
+        return None
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
