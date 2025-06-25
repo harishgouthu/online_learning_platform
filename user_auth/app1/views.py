@@ -56,14 +56,14 @@ from .serializers import (
 
 # ✅ Setup logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-# Avoid adding multiple handlers if already set
-if not logger.handlers:
-    file_handler = logging.FileHandler('transcript_api.log')
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+# logger.setLevel(logging.DEBUG)
+#
+# # Avoid adding multiple handlers if already set
+# if not logger.handlers:
+#     file_handler = logging.FileHandler('transcript_api.log')
+#     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+#     file_handler.setFormatter(formatter)
+#     logger.addHandler(file_handler)
 
 
 genai.configure(api_key=settings.GEMINI_API_KEY)
@@ -430,25 +430,7 @@ class AskQuestionAPIView(APIView):
         session, created = SessionModel.objects.get_or_create(user=user, video=video)
         session_status = "New session created" if created else "Session resumed"
 
-        # Transcript lookup from DB first
-        # transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
-        # full_transcript = transcript_obj.transcript_data if transcript_obj else None
-        # available_lang_names = []  # Ensure defined
-        #
-        # # If not found in DB, fallback to fetching and caching
-        # if not full_transcript:
-        #     transcript_data = get_transcript_with_cache(video_id)
-        #     full_transcript = transcript_data.get("segments") if transcript_data else None
-        #
-        #     if full_transcript:
-        #         TranscriptModel.objects.create(
-        #             youtube_video_id=video_id,
-        #             language='en',
-        #             transcript_data=full_transcript,
-        #             transcript_text=transcript_data.get("full_text", "")
-        #         )
-        # Track where the transcript came from
-        transcript_source = "model"  # default assumption
+        transcript_source = "model"
 
         transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
         full_transcript = transcript_obj.transcript_data if transcript_obj else None
@@ -464,9 +446,9 @@ class AskQuestionAPIView(APIView):
                     transcript_data=full_transcript,
                     transcript_text=transcript_data.get("full_text", "")
                 )
-                transcript_source = "fetched"  # updated since it was freshly fetched
+                transcript_source = "fetched"
 
-        available_lang_names = []  # ✅ Ensure it's always defined
+        available_lang_names = []
 
         if full_transcript:
             start_range = max(0, time_stamp - 60)
@@ -541,24 +523,6 @@ class AskQuestionAPIView(APIView):
                 'available_transcript_languages': available_lang_names if not full_transcript else []
             }
         }, status=status.HTTP_201_CREATED)
-
-        # return Response({
-        #     "success": True,
-        #     "message": "Q&A created successfully.",
-        #     "data": {
-        #         'id': qa.id,
-        #         'question': qa.question,
-        #         'answer': qa.answer,
-        #         'transcript_segment': transcript_segment if full_transcript else "Transcript not available.",
-        #         'session': session.id,
-        #         'session_status': session_status,
-        #         'time_stamp': qa.time_stamp,
-        #         'created_at': qa.created_at,
-        #         'available_transcript_languages': available_lang_names if not full_transcript else []
-        #     }
-        # }, status=status.HTTP_201_CREATED)
-
-
 
     def get(self, request):
         video_url = request.query_params.get('youtube_video_url')
@@ -770,6 +734,86 @@ class ClipTabAPIView(APIView):
         image.save(buffer, format='JPEG', quality=85)
         return buffer.getvalue()
 
+    # def post(self, request):
+    #     serializer = ImageUploadSerializer(data=request.data, context={'request': request})
+    #     if not serializer.is_valid():
+    #         return Response({
+    #             "success": False,
+    #             "errors": serializer.errors,
+    #             "message": "Invalid data submitted."
+    #         }, status=status.HTTP_400_BAD_REQUEST)
+    #
+    #     data = serializer.validated_data
+    #     user = request.user
+    #     youtube_url = data['youtube_video_url']
+    #     time_stamp = data['time_stamp']  # Parsed TimestampField
+    #     image = data['image']
+    #     question = data.get('question', '')
+    #
+    #     # Extract video ID and video title
+    #     video_id = extract_youtube_video_id(youtube_url)
+    #     if not video_id:
+    #         return Response({
+    #             "success": False,
+    #             "message": "Invalid YouTube URL."
+    #         }, status=status.HTTP_400_BAD_REQUEST)
+    #
+    #     video_title = get_video_title_with_cache(video_id)
+    #     if not video_title:
+    #         return Response({
+    #             "success": False,
+    #             "message": "Failed to retrieve video title from YouTube."
+    #         }, status=status.HTTP_400_BAD_REQUEST)
+    #
+    #     # Get or create Video instance
+    #     video, _ = VideoModel.objects.get_or_create(
+    #         youtube_video_id=video_id,
+    #         defaults={'video_title': video_title, 'video_url': youtube_url, 'user': user}
+    #     )
+    #
+    #     # Get or create Session instance
+    #     session, created = SessionModel.objects.get_or_create(user=user, video=video)
+    #     session_status = "New session created" if created else "Session resumed"
+    #
+    #     try:
+    #         image_bytes = self.convert_png_to_jpeg(image)
+    #         mime_type = 'image/jpeg'
+    #
+    #         model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
+    #         response = model.generate_content([
+    #             question,
+    #             {"mime_type": mime_type, "data": image_bytes}
+    #         ])
+    #         answer = response.text.strip()
+    #     except Exception as e:
+    #         return Response({
+    #             "success": False,
+    #             "message": f"Gemini image model processing failed: {str(e)}"
+    #         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    #
+    #     # Save clip to database
+    #     clip = ImageModel.objects.create(
+    #         image=image,
+    #         question=question,
+    #         answer=answer,
+    #         time_stamp=time_stamp,
+    #         session=session
+    #     )
+    #
+    #     return Response({
+    #         "success": True,
+    #         "message": "Image clip created successfully.",
+    #         "data": {
+    #             'id': clip.id,
+    #             'question': clip.question,
+    #             'answer': clip.answer,
+    #             'session_id': session.id,
+    #             'session_status': session_status,
+    #             'time_stamp': time_stamp,
+    #             'created_at': clip.created_at,
+    #             'image_url': request.build_absolute_uri(clip.image.url)
+    #         }
+    #     }, status=status.HTTP_201_CREATED)
     def post(self, request):
         serializer = ImageUploadSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
@@ -782,11 +826,11 @@ class ClipTabAPIView(APIView):
         data = serializer.validated_data
         user = request.user
         youtube_url = data['youtube_video_url']
-        time_stamp = data['time_stamp']  # Parsed TimestampField
+        time_stamp = data['time_stamp']
         image = data['image']
-        question = data.get('question', '')
+        question = data.get('question', '').strip()  # Trim whitespace
 
-        # Extract video ID and video title
+        # Extract video ID and title
         video_id = extract_youtube_video_id(youtube_url)
         if not video_id:
             return Response({
@@ -801,33 +845,33 @@ class ClipTabAPIView(APIView):
                 "message": "Failed to retrieve video title from YouTube."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Get or create Video instance
+        # Get or create Video and Session
         video, _ = VideoModel.objects.get_or_create(
             youtube_video_id=video_id,
             defaults={'video_title': video_title, 'video_url': youtube_url, 'user': user}
         )
-
-        # Get or create Session instance
         session, created = SessionModel.objects.get_or_create(user=user, video=video)
         session_status = "New session created" if created else "Session resumed"
 
-        try:
-            image_bytes = self.convert_png_to_jpeg(image)
-            mime_type = 'image/jpeg'
+        answer = ""
+        if question:
+            try:
+                image_bytes = self.convert_png_to_jpeg(image)
+                mime_type = 'image/jpeg'
 
-            model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
-            response = model.generate_content([
-                question,
-                {"mime_type": mime_type, "data": image_bytes}
-            ])
-            answer = response.text.strip()
-        except Exception as e:
-            return Response({
-                "success": False,
-                "message": f"Gemini image model processing failed: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
+                response = model.generate_content([
+                    question,
+                    {"mime_type": mime_type, "data": image_bytes}
+                ])
+                answer = response.text.strip()
+            except Exception as e:
+                return Response({
+                    "success": False,
+                    "message": f"Gemini image model processing failed: {str(e)}"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Save clip to database
+        # Save to DB
         clip = ImageModel.objects.create(
             image=image,
             question=question,
@@ -850,6 +894,7 @@ class ClipTabAPIView(APIView):
                 'image_url': request.build_absolute_uri(clip.image.url)
             }
         }, status=status.HTTP_201_CREATED)
+
     def get(self, request):
         youtube_url = request.query_params.get('youtube_video_url')
         if not youtube_url:

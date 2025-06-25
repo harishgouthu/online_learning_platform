@@ -1,4 +1,5 @@
-
+import warnings
+warnings.filterwarnings("ignore")
 import os
 from pathlib import Path
 from datetime import timedelta
@@ -79,12 +80,17 @@ SIMPLE_JWT = {
 JWT_AUTH_COOKIE = 'access_token'
 JWT_AUTH_REFRESH_COOKIE = 'refresh_token'
 JWT_AUTH_COOKIE_USE_CSRF = True
+#
+# ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1', 'password2']
+# ACCOUNT_EMAIL_VERIFICATION = 'optional'
+# ACCOUNT_UNIQUE_EMAIL = True
+# ACCOUNT_AUTHENTICATION_METHOD = 'email'
+# ACCOUNT_USERNAME_REQUIRED = None
 
+ACCOUNT_LOGIN_METHODS = {'email'}  # replaces deprecated AUTHENTICATION_METHOD
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1', 'password2']
 ACCOUNT_EMAIL_VERIFICATION = 'optional'
 ACCOUNT_UNIQUE_EMAIL = True
-ACCOUNT_AUTHENTICATION_METHOD = 'email'
-ACCOUNT_USERNAME_REQUIRED = None
 
 
 
@@ -112,29 +118,43 @@ SITE_ID = 1
 
 
 
+# settings.py
+
+# settings.py
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'handlers': {
-        'file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': 'django.log',
+    'loggers': {
+        # ✅ This keeps request/response logs in terminal
+        'django.server': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # 🔇 Silence Pillow and other noisy libs
+        'PIL': {
+            'handlers': ['null'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'urllib3': {
+            'handlers': ['null'],
+            'level': 'WARNING',
+            'propagate': False,
         },
     },
-    'loggers': {
-        'django': {
-            'handlers': ['file'],
-            'level': 'DEBUG',
-            'propagate': True,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
         },
-        'users_app': {
-            'handlers': ['file'],
-            'level': 'INFO',
-            'propagate': True,
+        'null': {
+            'class': 'logging.NullHandler',
         },
     },
 }
+
+
 
 
 REST_AUTH_REGISTER_SERIALIZERS = {
@@ -257,27 +277,15 @@ YOUTUBE_API_KEY = env('YOUTUBE_API_KEY')
 GOOGLE_APPLICATION_CREDENTIALS = env('GOOGLE_APPLICATION_CREDENTIALS')
 
 
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-        },
-    },
-    'root': {
-        'handlers': ['console'],
-        'level': 'DEBUG',
-    },
-}
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': 'redis://127.0.0.1:6379/1',  # adjust as needed
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-        }
-    }
-}
+
+# CACHES = {
+#     'default': {
+#         'BACKEND': 'django_redis.cache.RedisCache',
+#         'LOCATION': 'redis://127.0.0.1:6379/1',  # adjust as needed
+#         'OPTIONS': {
+#             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+#         }
+#     }
+# }
 
