@@ -64,7 +64,7 @@ class CreateSessionSerializer(serializers.Serializer):
     youtube_video_url = serializers.URLField()
 class ImageUploadSerializer(serializers.Serializer):
     youtube_video_url = serializers.URLField()
-    question = serializers.CharField(required=False, default="")
+    question = serializers.CharField(required=False, allow_blank=True)
     time_stamp = TimestampField()
     image = serializers.ImageField()
 

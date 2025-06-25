@@ -255,9 +255,33 @@ def fetch_transcript_with_ytdlp(video_id):
         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
         return None
 
+# def get_transcript_with_cache(video_id):
+#     if video_id in transcript_cache:
+#         return transcript_cache[video_id]
+#
+#     transcript = fetch_transcript_with_ytdlp(video_id)
+#
+#     if not transcript:
+#         transcript = fetch_transcript_from_youtube(video_id)
+#
+#     if transcript:
+#         full_text = " ".join([seg['text'] for seg in transcript])
+#         transcript_cache[video_id] = {
+#             "segments": transcript,
+#             "full_text": full_text
+#         }
+#         return transcript_cache[video_id]
+#
+#     return None
+
+from django.core.cache import cache
+
 def get_transcript_with_cache(video_id):
-    if video_id in transcript_cache:
-        return transcript_cache[video_id]
+    cache_key = f"transcript:{video_id}"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return cached_data
 
     transcript = fetch_transcript_with_ytdlp(video_id)
 
@@ -266,47 +290,15 @@ def get_transcript_with_cache(video_id):
 
     if transcript:
         full_text = " ".join([seg['text'] for seg in transcript])
-        transcript_cache[video_id] = {
+        transcript_data = {
             "segments": transcript,
             "full_text": full_text
         }
-        return transcript_cache[video_id]
+        # Cache it in Redis for 24 hours (86400 seconds)
+        cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)
+        return transcript_data
 
     return None
-
-# def get_transcript_with_cache(video_id):
-#     if video_id in transcript_cache:
-#         return transcript_cache[video_id]
-#
-#     # First attempt: YouTubeTranscriptAp
-#     transcript = fetch_transcript_with_ytdlp(video_id)
-#     # Fallback to yt-dlp if needed
-#     if not transcript:
-#         transcript = fetch_transcript_from_youtube(video_id)
-#
-#     if transcript:
-#         transcript_cache[video_id] = transcript
-#
-#     return transcript
-
-# def get_transcript_with_cache(video_id):
-#     cache_key = f"transcript:{video_id}"
-#     transcript = cache.get(cache_key)
-#
-#     if transcript:
-#         return transcript
-#
-#     transcript = fetch_transcript_with_ytdlp(video_id)
-#
-#
-#     # Fallback to yt-dlp
-#     if not transcript:
-#         transcript = fetch_transcript_from_youtube(video_id)
-#
-#     if transcript:
-#         cache.set(cache_key, transcript, timeout=60 * 60 * 24)  # cache for 24 hours
-#
-#     return transcript
 
 def fetch_video_title_via_api(video_id, youtube_api_key):
     try:
@@ -828,7 +820,13 @@ class ClipTabAPIView(APIView):
         youtube_url = data['youtube_video_url']
         time_stamp = data['time_stamp']
         image = data['image']
-        question = data.get('question', '').strip()  # Trim whitespace
+
+        # ✅ Safe question handling
+        question = data.get('question') or ""
+        question = question.strip()
+        answer = ""
+
+        print("Received question:", repr(question))  # Optional debug
 
         # Extract video ID and title
         video_id = extract_youtube_video_id(youtube_url)
@@ -853,7 +851,7 @@ class ClipTabAPIView(APIView):
         session, created = SessionModel.objects.get_or_create(user=user, video=video)
         session_status = "New session created" if created else "Session resumed"
 
-        answer = ""
+        # ✅ Only call Gemini if a question was given
         if question:
             try:
                 image_bytes = self.convert_png_to_jpeg(image)
@@ -871,7 +869,7 @@ class ClipTabAPIView(APIView):
                     "message": f"Gemini image model processing failed: {str(e)}"
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Save to DB
+        # ✅ Save to DB no matter what
         clip = ImageModel.objects.create(
             image=image,
             question=question,
