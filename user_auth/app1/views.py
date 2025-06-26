@@ -72,9 +72,9 @@ YOUTUBE_API_KEY = settings.YOUTUBE_API_KEY
 
 video_title_cache = {}
 transcript_cache = {}
-
-COOKIES_FILE = "/home/ubuntu/cookies.txt"
-
+#
+# COOKIES_FILE = "/home/ubuntu/cookies.txt"
+# COOKIES_FILE = os.path.join("D:", "cookies.txt")
 def extract_youtube_video_id(url):
     parsed_url = urlparse(url)
     hostname = parsed_url.hostname
@@ -89,17 +89,6 @@ def extract_youtube_video_id(url):
             return parsed_url.path.split('/embed/')[1]
         elif parsed_url.path.startswith('/shorts/'):
             return parsed_url.path.split('/shorts/')[1]
-    return None
-
-def fetch_video_title(video_id):
-    try:
-        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-        response = youtube.videos().list(part="snippet", id=video_id).execute()
-        items = response.get('items', [])
-        if items:
-            return items[0]['snippet']['title']
-    except HttpError as e:
-        logger.error(f"YouTube API error for video {video_id}: {e}")
     return None
 
 
@@ -180,7 +169,7 @@ def fetch_transcript_with_ytdlp(video_id):
                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
                     'quiet': True,
                     'no_warnings': True,
-                    'cookiefile': COOKIES_FILE,
+                    # 'cookiefile': COOKIES_FILE,
                 }
 
                 with YoutubeDL(ydl_opts) as ydl:
@@ -232,33 +221,33 @@ def fetch_transcript_from_youtube(video_id):
     return None
 
 
-def get_transcript_with_cache(video_id):
-    cache_key = f"transcript:{video_id}"
-    cached_data = cache.get(cache_key)
-
-    if cached_data:
-        logger.info(f"Cache hit for transcript: {video_id}")
-        return cached_data
-
-    # First attempt yt-dlp
-    transcript = fetch_transcript_with_ytdlp(video_id)
-
-    # Fallback to YouTubeTranscriptApi if yt-dlp fails
-    if not transcript:
-        transcript = fetch_transcript_from_youtube(video_id)
-
-    if transcript:
-        full_text = " ".join([seg['text'] for seg in transcript])
-        transcript_data = {
-            "segments": transcript,
-            "full_text": full_text
-        }
-        cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)  # 24 hours
-        logger.info(f"Transcript cached for {video_id}")
-        return transcript_data
-
-    logger.warning(f"No transcript found for {video_id}")
-    return None
+# def get_transcript_with_cache(video_id):
+#     cache_key = f"transcript:{video_id}"
+#     cached_data = cache.get(cache_key)
+#
+#     if cached_data:
+#         logger.info(f"Cache hit for transcript: {video_id}")
+#         return cached_data
+#
+#     # First attempt yt-dlp
+#     transcript = fetch_transcript_with_ytdlp(video_id)
+#
+#     # Fallback to YouTubeTranscriptApi if yt-dlp fails
+#     if not transcript:
+#         transcript = fetch_transcript_from_youtube(video_id)
+#
+#     if transcript:
+#         full_text = " ".join([seg['text'] for seg in transcript])
+#         transcript_data = {
+#             "segments": transcript,
+#             "full_text": full_text
+#         }
+#         cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)  # 24 hours
+#         logger.info(f"Transcript cached for {video_id}")
+#         return transcript_data
+#
+#     logger.warning(f"No transcript found for {video_id}")
+#     return None
 
 # def fetch_transcript_with_ytdlp(video_id):
 #     url = f"https://www.youtube.com/watch?v={video_id}"
@@ -307,24 +296,24 @@ def get_transcript_with_cache(video_id):
 #         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
 #         return None
 
-# def get_transcript_with_cache(video_id):
-#     if video_id in transcript_cache:
-#         return transcript_cache[video_id]
-#
-#     transcript = fetch_transcript_with_ytdlp(video_id)
-#
-#     if not transcript:
-#         transcript = fetch_transcript_from_youtube(video_id)
-#
-#     if transcript:
-#         full_text = " ".join([seg['text'] for seg in transcript])
-#         transcript_cache[video_id] = {
-#             "segments": transcript,
-#             "full_text": full_text
-#         }
-#         return transcript_cache[video_id]
-#
-#     return None
+def get_transcript_with_cache(video_id):
+    if video_id in transcript_cache:
+        return transcript_cache[video_id]
+
+    transcript = fetch_transcript_with_ytdlp(video_id)
+
+    if not transcript:
+        transcript = fetch_transcript_from_youtube(video_id)
+
+    if transcript:
+        full_text = " ".join([seg['text'] for seg in transcript])
+        transcript_cache[video_id] = {
+            "segments": transcript,
+            "full_text": full_text
+        }
+        return transcript_cache[video_id]
+
+    return None
 
 
 # def get_transcript_with_cache(video_id):
@@ -351,18 +340,6 @@ def get_transcript_with_cache(video_id):
 #
 #     return None
 
-def fetch_video_title_via_api(video_id, youtube_api_key):
-    try:
-        youtube = build('youtube', 'v3', developerKey=youtube_api_key)
-        response = youtube.videos().list(part="snippet", id=video_id).execute()
-        items = response.get('items', [])
-        if items:
-            return items[0]['snippet']['title']
-    except HttpError as e:
-        logger.warning(f"YouTube API error for video {video_id}: {e}")
-    except Exception as e:
-        logger.warning(f"Unexpected error in YouTube API for video {video_id}: {e}")
-    return None
 
 
 #
@@ -386,47 +363,38 @@ def fetch_video_title_via_api(video_id, youtube_api_key):
 
 
 
-# def get_video_title_with_cache(video_id, youtube_api_key=None):
-#     if video_id in video_title_cache:
-#         return video_title_cache[video_id]
-#
-#     title = None
-#
-#     # Step 1: Try YouTube API
-#     if youtube_api_key:
-#         title = fetch_video_title_via_api(video_id, youtube_api_key)
-#
-#     # Step 2: Fallback to yt-dlp if API fails
-#     if not title:
-#         title = fetch_video_title_via_ytdlp(video_id)
-#
-#     # Cache if success
-#     if title:
-#         video_title_cache[video_id] = title
-#
-#     return title
-
-
-#
 def get_video_title_with_cache(video_id, youtube_api_key=None):
-    cache_key = f"video_title:{video_id}"
-    title = cache.get(cache_key)
+    if video_id in video_title_cache:
+        return video_title_cache[video_id]
 
-    if title:
-        return title
+    title = None
 
     # Step 1: Try YouTube API
     if youtube_api_key:
         title = fetch_video_title_via_api(video_id, youtube_api_key)
 
-    # Step 2: Fallback to yt-dlp
+    # Step 2: Fallback to yt-dlp if API fails
     if not title:
         title = fetch_video_title_via_ytdlp(video_id)
 
+    # Cache if success
     if title:
-        cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
+        video_title_cache[video_id] = title
 
     return title
+def fetch_video_title_via_api(video_id, youtube_api_key):
+    try:
+        youtube = build('youtube', 'v3', developerKey=youtube_api_key)
+        response = youtube.videos().list(part="snippet", id=video_id).execute()
+        items = response.get('items', [])
+        if items:
+            return items[0]['snippet']['title']
+    except HttpError as e:
+        logger.warning(f"YouTube API error for video {video_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected error in YouTube API for video {video_id}: {e}")
+    return None
+
 def fetch_video_title_via_ytdlp(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
     COOKIES_FILE = "/home/ubuntu/cookies.txt"  # Path to your cookies
@@ -437,7 +405,7 @@ def fetch_video_title_via_ytdlp(video_id):
             'no_warnings': True,
             'skip_download': True,
             # Optional: use cookies only if required
-            'cookiefile': COOKIES_FILE,
+            # 'cookiefile': COOKIES_FILE,
         }
 
         with YoutubeDL(ydl_opts) as ydl:
@@ -447,6 +415,27 @@ def fetch_video_title_via_ytdlp(video_id):
     except Exception as e:
         logger.error(f"Failed to fetch title for video {video_id}: {e}")
         return None
+#
+# def get_video_title_with_cache(video_id, youtube_api_key=None):
+#     cache_key = f"video_title:{video_id}"
+#     title = cache.get(cache_key)
+#
+#     if title:
+#         return title
+#
+#     # Step 1: Try YouTube API
+#     if youtube_api_key:
+#         title = fetch_video_title_via_api(video_id, youtube_api_key)
+#
+#     # Step 2: Fallback to yt-dlp
+#     if not title:
+#         title = fetch_video_title_via_ytdlp(video_id)
+#
+#     if title:
+#         cache.set(cache_key, title, timeout=60 * 60 * 24)  # cache for 24 hours
+#
+#     return title
+
 
 class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1878,7 +1867,7 @@ class CreateSessionAPIView(APIView):
                 "message": "Invalid YouTube URL. Please enter a valid video link."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        video_title = fetch_video_title(video_id)
+        video_title = get_video_title_with_cache(video_id)
         if not video_title:
             return Response({
                 "success": False,
@@ -2007,3 +1996,18 @@ class YoutubeTranscriptView(APIView):
             "message": "Invalid input data.",
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+from rest_framework.generics import ListAPIView
+from .models import TranscriptModel
+from .serializers import TranscriptSerializer
+from rest_framework.pagination import PageNumberPagination
+
+class TranscriptPagination(PageNumberPagination):
+    page_size = 10  # Or 20, 50, etc. depending on performance
+
+class TranscriptListAPIView(ListAPIView):
+    queryset = TranscriptModel.objects.all().order_by('-created_at')
+    serializer_class = TranscriptSerializer
+    pagination_class = TranscriptPagination

@@ -188,3 +188,9 @@ class VideoCourseUpdateSerializer(serializers.ModelSerializer):
         if value.user != self.context['request'].user:
             raise serializers.ValidationError("You don't own this course.")
         return value
+from .models import TranscriptModel
+
+class TranscriptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TranscriptModel
+        fields = ['id', 'youtube_video_id', 'language', 'created_at', 'updated_at', 'transcript_text']

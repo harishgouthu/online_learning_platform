@@ -209,6 +209,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'user_auth.wsgi.application'
 
+# settings.py
+ASGI_APPLICATION = "user_auth.asgi.application"
 
 
 LOGIN_REDIRECT_URL = '/'
