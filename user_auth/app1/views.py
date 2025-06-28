@@ -52,6 +52,7 @@ from .serializers import (
     CreateSessionSerializer,
     YoutubeTranscriptSerializer,
     TimestampField,
+    ScreenshotRequestSerializer,
 )
 
 # ✅ Setup logging
@@ -2011,3 +2012,59 @@ class TranscriptListAPIView(ListAPIView):
     queryset = TranscriptModel.objects.all().order_by('-created_at')
     serializer_class = TranscriptSerializer
     pagination_class = TranscriptPagination
+
+
+import os
+import re
+import tempfile
+import subprocess
+from datetime import datetime
+import shutil
+
+
+
+def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, 'video.mp4')
+        output_image = os.path.join(tmpdir, 'frame.jpg')
+
+        # Step 1: Download video using yt-dlp
+        subprocess.run([
+            'yt-dlp', '-f', 'mp4', '--quiet', '--no-warnings',
+            '-o', video_path, youtube_url
+        ], check=True)
+
+        # Step 2: Extract frame at specified timestamp using ffmpeg
+        subprocess.run([
+            'ffmpeg', '-ss', str(timestamp), '-i', video_path,
+            '-frames:v', '1', '-q:v', '2', output_image,
+            '-loglevel', 'quiet'
+        ], check=True)
+
+        # Step 3: Move the extracted frame to media/clips/
+        clips_dir = os.path.join(settings.MEDIA_ROOT, 'clips')
+        os.makedirs(clips_dir, exist_ok=True)
+
+        filename = f"clip_{hash(youtube_url)}_{int(timestamp)}_{int(datetime.now().timestamp())}.jpg"
+        final_path = os.path.join(clips_dir, filename)
+
+        shutil.move(output_image, final_path)
+
+        # Return URL relative to MEDIA_URL
+        return f"{settings.MEDIA_URL}clips/{filename}"
+
+
+class YouTubeScreenshotAPIView(APIView):
+    def post(self, request):
+        serializer = ScreenshotRequestSerializer(data=request.data)
+        if serializer.is_valid():
+            url = serializer.validated_data['url']
+            timestamp = serializer.validated_data['timestamp']
+            try:
+                clip_path = generate_screenshot_ffmpeg_only(url, timestamp)
+                return Response({"clip": clip_path}, status=status.HTTP_200_OK)
+            except subprocess.CalledProcessError:
+                return Response({"error": "Error processing video with yt-dlp or ffmpeg"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

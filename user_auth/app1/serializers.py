@@ -50,6 +50,9 @@ class TimestampField(serializers.Field):
 
     def to_representation(self, value):
         return str(value)
+class ScreenshotRequestSerializer(serializers.Serializer):
+    url = serializers.URLField()
+    timestamp = TimestampField()
 
 class YoutubeSerializer(serializers.Serializer):
     youtube_video_url = serializers.URLField()
@@ -194,3 +197,4 @@ class TranscriptSerializer(serializers.ModelSerializer):
     class Meta:
         model = TranscriptModel
         fields = ['id', 'youtube_video_id', 'language', 'created_at', 'updated_at', 'transcript_text']
+

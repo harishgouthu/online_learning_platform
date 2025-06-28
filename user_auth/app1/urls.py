@@ -5,10 +5,11 @@ from .views import (CourseAPIView, AskQuestionAPIView, UserQaWatchedSessionsView
                     AllUsersWatchedSessionsView, ClipTabAPIView, UserClipWatchedSessionsView,
                     CreateNotesAPIView,  GetNotesAPIView, CombinedDataAPIView, CreateSessionAPIView,
                     VideoCourseUpdateView, YoutubeVideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView,
-                    CourseVideosAPIView, YoutubeTranscriptView, TestYouTubeAPIView, TranscriptListAPIView)
+                    CourseVideosAPIView, YoutubeTranscriptView, TestYouTubeAPIView, TranscriptListAPIView, YouTubeScreenshotAPIView)
 
 urlpatterns = [
     # path('ytdlp-transcript/', YTDLPTranscriptAPIView.as_view(), name='ytdlp_transcript'),
+    path('screenshot/', YouTubeScreenshotAPIView.as_view(), name='youtube_screenshot'),
     path('transcripts/', TranscriptListAPIView.as_view(), name='transcript-list'),
     path('courses/', CourseAPIView.as_view(), name='course-api'),
     path('courses/<int:pk>/', CourseAPIView.as_view(), name='course-api-detail'),
