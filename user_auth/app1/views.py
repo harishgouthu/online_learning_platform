@@ -2013,18 +2013,23 @@ class TranscriptListAPIView(ListAPIView):
     serializer_class = TranscriptSerializer
     pagination_class = TranscriptPagination
 
-
 import os
-import re
-import tempfile
+import shutil
 import subprocess
 from datetime import datetime
-import shutil
+from tempfile import TemporaryDirectory
 
+from django.http import StreamingHttpResponse
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.parsers import JSONParser
+
+from .serializers import ScreenshotRequestSerializer
 
 
 def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with TemporaryDirectory() as tmpdir:
         video_path = os.path.join(tmpdir, 'video.mp4')
         output_image = os.path.join(tmpdir, 'frame.jpg')
 
@@ -2034,37 +2039,49 @@ def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
             '-o', video_path, youtube_url
         ], check=True)
 
-        # Step 2: Extract frame at specified timestamp using ffmpeg
+        # Step 2: Extract frame using ffmpeg
         subprocess.run([
             'ffmpeg', '-ss', str(timestamp), '-i', video_path,
             '-frames:v', '1', '-q:v', '2', output_image,
             '-loglevel', 'quiet'
         ], check=True)
 
-        # Step 3: Move the extracted frame to media/clips/
-        clips_dir = os.path.join(settings.MEDIA_ROOT, 'clips')
-        os.makedirs(clips_dir, exist_ok=True)
-
-        filename = f"clip_{hash(youtube_url)}_{int(timestamp)}_{int(datetime.now().timestamp())}.jpg"
-        final_path = os.path.join(clips_dir, filename)
-
+        # Step 3: Move output to safe location (project root or media/)
+        final_path = os.path.join(os.getcwd(), f"clip_{int(datetime.now().timestamp())}.jpg")
         shutil.move(output_image, final_path)
-
-        # Return URL relative to MEDIA_URL
-        return f"{settings.MEDIA_URL}clips/{filename}"
+        return final_path
 
 
 class YouTubeScreenshotAPIView(APIView):
+    parser_classes = [JSONParser]
+
     def post(self, request):
         serializer = ScreenshotRequestSerializer(data=request.data)
         if serializer.is_valid():
             url = serializer.validated_data['url']
             timestamp = serializer.validated_data['timestamp']
+
             try:
-                clip_path = generate_screenshot_ffmpeg_only(url, timestamp)
-                return Response({"clip": clip_path}, status=status.HTTP_200_OK)
+                image_path = generate_screenshot_ffmpeg_only(url, timestamp)
+
+                def file_iterator(path, chunk_size=8192):
+                    with open(path, 'rb') as f:
+                        while chunk := f.read(chunk_size):
+                            yield chunk
+                    # Cleanup after streaming is done
+                    try:
+                        os.remove(path)
+                    except Exception as e:
+                        print(f"[⚠️] Could not delete file: {e}")
+
+                response = StreamingHttpResponse(file_iterator(image_path), content_type='image/jpeg')
+                response['Content-Disposition'] = 'inline; filename="screenshot.jpg"'
+                return response
+
             except subprocess.CalledProcessError:
-                return Response({"error": "Error processing video with yt-dlp or ffmpeg"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({"error": "Failed to process video"}, status=500)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": str(e)}, status=500)
+
+        return Response(serializer.errors, status=400)
+
