@@ -2032,26 +2032,18 @@ def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
     from tempfile import TemporaryDirectory
 
     with TemporaryDirectory() as tmpdir:
-        video_path = os.path.join(tmpdir, 'clip.mp4')
+        video_path = os.path.join(tmpdir, 'full_video.mp4')
         output_image = os.path.join(tmpdir, 'frame.jpg')
 
-        # Clip only 2 seconds around the timestamp
-        start = max(timestamp - 1, 0)
-        end = timestamp + 1
-        section = f"*{int(start)}-{int(end)}"
-
-        print(f"[DEBUG] Section: {section}")
-        print(f"[DEBUG] Downloading video to: {video_path}")
+        print(f"[DEBUG] Downloading full video to: {video_path}")
 
         try:
-            # Step 1: Use yt-dlp to download only the required section (requires DASH-compatible formats)
+            # Step 1: Download full video at lower resolution
             yt_dlp_cmd = [
                 'yt-dlp',
-                '--download-sections', section,
-                '-f', 'bv[ext=mp4][height<=360]/bv/bestvideo',
-                '--merge-output-format', 'mp4',
-                '--quiet', '--no-warnings',
+                '-f', 'bv[ext=mp4][height<=360]/bv/bestvideo[ext=mp4]/best[ext=mp4]',
                 '-o', video_path,
+                '--quiet', '--no-warnings',
                 youtube_url
             ]
             result1 = subprocess.run(yt_dlp_cmd, capture_output=True, text=True)
@@ -2060,7 +2052,7 @@ def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
             result1.check_returncode()
 
             if not os.path.exists(video_path):
-                raise Exception("❌ yt-dlp did not produce a video file. Check format compatibility or URL.")
+                raise Exception("❌ yt-dlp did not download the video.")
 
             # Step 2: Extract frame using ffmpeg
             ffmpeg_cmd = [
@@ -2083,6 +2075,8 @@ def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
             raise
         except Exception as e:
             print(f"[ERROR] General error: {e}")
+            raise
+
             raise
 class YouTubeScreenshotAPIView(APIView):
     parser_classes = [JSONParser]
