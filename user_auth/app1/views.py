@@ -2020,38 +2020,70 @@ from datetime import datetime
 from tempfile import TemporaryDirectory
 
 from django.http import StreamingHttpResponse
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
 from rest_framework.parsers import JSONParser
 
-from .serializers import ScreenshotRequestSerializer
 
 
 def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
+    import subprocess
+    import os
+    import shutil
+    from datetime import datetime
+    from tempfile import TemporaryDirectory
+
     with TemporaryDirectory() as tmpdir:
-        video_path = os.path.join(tmpdir, 'video.mp4')
+        video_path = os.path.join(tmpdir, 'clip.mp4')
         output_image = os.path.join(tmpdir, 'frame.jpg')
 
-        # Step 1: Download video using yt-dlp
-        subprocess.run([
-            'yt-dlp', '-f', 'mp4', '--quiet', '--no-warnings',
-            '-o', video_path, youtube_url
-        ], check=True)
+        # Clip only 2 seconds around the timestamp
+        start = max(timestamp - 1, 0)
+        end = timestamp + 1
+        section = f"*{int(start)}-{int(end)}"
 
-        # Step 2: Extract frame using ffmpeg
-        subprocess.run([
-            'ffmpeg', '-ss', str(timestamp), '-i', video_path,
-            '-frames:v', '1', '-q:v', '2', output_image,
-            '-loglevel', 'quiet'
-        ], check=True)
+        print(f"[DEBUG] Section: {section}")
+        print(f"[DEBUG] Downloading video to: {video_path}")
 
-        # Step 3: Move output to safe location (project root or media/)
-        final_path = os.path.join(os.getcwd(), f"clip_{int(datetime.now().timestamp())}.jpg")
-        shutil.move(output_image, final_path)
-        return final_path
+        try:
+            # Step 1: Use yt-dlp to download only the required section (requires DASH-compatible formats)
+            yt_dlp_cmd = [
+                'yt-dlp',
+                '--download-sections', section,
+                '-f', 'bv[ext=mp4][height<=360]/bv/bestvideo',
+                '--merge-output-format', 'mp4',
+                '--quiet', '--no-warnings',
+                '-o', video_path,
+                youtube_url
+            ]
+            result1 = subprocess.run(yt_dlp_cmd, capture_output=True, text=True)
+            print("[YT-DLP stdout]:", result1.stdout)
+            print("[YT-DLP stderr]:", result1.stderr)
+            result1.check_returncode()
 
+            if not os.path.exists(video_path):
+                raise Exception("❌ yt-dlp did not produce a video file. Check format compatibility or URL.")
 
+            # Step 2: Extract frame using ffmpeg
+            ffmpeg_cmd = [
+                'ffmpeg', '-ss', str(timestamp), '-i', video_path,
+                '-frames:v', '1', '-q:v', '2', output_image,
+                '-loglevel', 'error'
+            ]
+            result2 = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            print("[FFMPEG stdout]:", result2.stdout)
+            print("[FFMPEG stderr]:", result2.stderr)
+            result2.check_returncode()
+
+            # Step 3: Move image to permanent location
+            final_path = os.path.join(os.getcwd(), f"screenshot_{int(datetime.now().timestamp())}.jpg")
+            shutil.move(output_image, final_path)
+            return final_path
+
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Subprocess failed: {e}")
+            raise
+        except Exception as e:
+            print(f"[ERROR] General error: {e}")
+            raise
 class YouTubeScreenshotAPIView(APIView):
     parser_classes = [JSONParser]
 
