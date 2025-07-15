@@ -54,7 +54,7 @@ from .serializers import (
     TimestampField,
     ScreenshotRequestSerializer,
 )
-
+from .utils import has_exceeded_question_limit
 # ✅ Setup logging
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
@@ -122,34 +122,51 @@ def get_transcript_languages_cached(video_id):
 
     return languages
 
-def fetch_transcript_from_youtube(video_id):
-    try:
-        # Primary: Try YouTubeTranscriptApi
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-    except NoTranscriptFound:
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB', 'en-US'])
-        except Exception as e:
-            logger.warning(f"Transcript still not found for video {video_id}: {e}")
-            return fetch_transcript_with_ytdlp(video_id)  # Fallback to yt-dlp
-    except Exception as e:
-        logger.warning(f"YouTubeTranscriptApi failed for video {video_id}: {e}")
-        return fetch_transcript_with_ytdlp(video_id)  # Fallback to yt-dlp
-
-    return [
-        {'text': entry['text'], 'start': entry['start'], 'duration': entry['duration']}
-        for entry in transcript
-    ]
-
-
-
-
 def convert_to_seconds(hms_str):
     """Convert HH:MM:SS.mmm to seconds (float)."""
     h, m, s = hms_str.split(":")
     return int(h) * 3600 + int(m) * 60 + float(s)
 
 
+
+def fetch_transcript_with_super_data_api(video_id):
+    """
+    Fetch transcript using Supadata API via RapidAPI.
+    Falls back to logging warning if no transcript found or on error.
+    Returns list of segments: [{'text': ..., 'start': ..., 'duration': ...}]
+    """
+    api_url = "https://youtube-transcripts.p.rapidapi.com/youtube/transcript"
+    full_video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    headers = {
+        "x-rapidapi-host": "youtube-transcripts.p.rapidapi.com",
+        "x-rapidapi-key": settings.RAPIDAPI_KEY,
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        response = requests.get(api_url, headers=headers, params={"url": full_video_url})
+        if response.status_code != 200:
+            logger.warning(f"Supadata API error for {video_id}: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+        if "content" not in data or not data["content"]:
+            logger.warning(f"No transcript content returned for {video_id}. Full response: {data}")
+            return None
+
+        return [
+            {
+                'text': seg['text'],
+                'start': seg['offset'] / 1000,      # Convert ms to seconds
+                'duration': seg['duration'] / 1000  # Convert ms to seconds
+            }
+            for seg in data['content']
+        ]
+
+    except Exception as e:
+        logger.warning(f"Exception while fetching transcript for {video_id}: {e}")
+        return None
 
 
 
@@ -159,8 +176,6 @@ def fetch_transcript_with_ytdlp(video_id):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            vtt_file = None
-
             for lang in lang_options:
                 ydl_opts = {
                     'skip_download': True,
@@ -170,141 +185,57 @@ def fetch_transcript_with_ytdlp(video_id):
                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
                     'quiet': True,
                     'no_warnings': True,
-                    # 'cookiefile': COOKIES_FILE,
                 }
 
                 with YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
-                candidate = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
-                if os.path.exists(candidate):
-                    vtt_file = candidate
-                    break
+                vtt_file = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
+                if os.path.exists(vtt_file):
+                    return [
+                        {
+                            'text': caption.text.strip(),
+                            'start': convert_to_seconds(caption.start),
+                            'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
+                        }
+                        for caption in webvtt.read(vtt_file)
+                    ]
 
-            if not vtt_file:
-                logger.warning(f"No subtitles found for video {video_id}")
-                return None
-
-            transcript = [
-                {
-                    'text': caption.text.strip(),
-                    'start': convert_to_seconds(caption.start),
-                    'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
-                }
-                for caption in webvtt.read(vtt_file)
-            ]
-
-            return transcript
-
+        logger.warning(f"No subtitles found for video {video_id}")
     except Exception as e:
-        logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
-        return None
-
-
-def fetch_transcript_from_youtube(video_id):
-    # Fallback: use YouTubeTranscriptApi (you should import and handle errors)
-
-
-    try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return [
-            {
-                "text": segment["text"],
-                "start": segment["start"],
-                "duration": segment["duration"]
-            }
-            for segment in transcript
-        ]
-    except (TranscriptsDisabled, NoTranscriptFound) as e:
-        logger.warning(f"Transcript not available via API for {video_id}: {e}")
-    except Exception as e:
-        logger.error(f"API transcript failed for {video_id}: {e}")
+        logger.error(f"yt-dlp failed for {video_id}: {e}")
     return None
 
 
-# def get_transcript_with_cache(video_id):
-#     cache_key = f"transcript:{video_id}"
-#     cached_data = cache.get(cache_key)
-#
-#     if cached_data:
-#         logger.info(f"Cache hit for transcript: {video_id}")
-#         return cached_data
-#
-#     # First attempt yt-dlp
-#     transcript = fetch_transcript_with_ytdlp(video_id)
-#
-#     # Fallback to YouTubeTranscriptApi if yt-dlp fails
-#     if not transcript:
-#         transcript = fetch_transcript_from_youtube(video_id)
-#
-#     if transcript:
-#         full_text = " ".join([seg['text'] for seg in transcript])
-#         transcript_data = {
-#             "segments": transcript,
-#             "full_text": full_text
-#         }
-#         cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)  # 24 hours
-#         logger.info(f"Transcript cached for {video_id}")
-#         return transcript_data
-#
-#     logger.warning(f"No transcript found for {video_id}")
-#     return None
+def fetch_transcript_with_api(video_id):
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+    except NoTranscriptFound:
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en-GB', 'en-US'])
+        except Exception as e:
+            logger.warning(f"NoTranscriptFound fallback also failed for {video_id}: {e}")
+            return None
+    except Exception as e:
+        logger.warning(f"YouTubeTranscriptApi exception for {video_id}: {e}")
+        return None
 
-# def fetch_transcript_with_ytdlp(video_id):
-#     url = f"https://www.youtube.com/watch?v={video_id}"
-#     lang_options = ['en', 'en-US', 'en-GB']
-#
-#     try:
-#         with tempfile.TemporaryDirectory() as tmpdir:
-#             vtt_file = None
-#
-#             for lang in lang_options:
-#                 ydl_opts = {
-#                     'skip_download': True,
-#                     'writesubtitles': True,
-#                     'writeautomaticsub': True,
-#                     'subtitleslangs': [lang],
-#                     'outtmpl': os.path.join(tmpdir, f'%(id)s.%(ext)s'),
-#                     'quiet': True,
-#                     'no_warnings': True,
-#                 }
-#
-#                 with YoutubeDL(ydl_opts) as ydl:
-#                     ydl.download([url])
-#
-#                 candidate = os.path.join(tmpdir, f'{video_id}.{lang}.vtt')
-#                 if os.path.exists(candidate):
-#                     vtt_file = candidate
-#                     break
-#
-#             if not vtt_file:
-#                 logger.warning(f"No subtitles found for video {video_id}")
-#                 return None
-#
-#             # Parse VTT file
-#             transcript = [
-#                 {
-#                     'text': caption.text.strip(),
-#                     'start': convert_to_seconds(caption.start),
-#                     'duration': convert_to_seconds(caption.end) - convert_to_seconds(caption.start)
-#                 }
-#                 for caption in webvtt.read(vtt_file)
-#             ]
-#
-#             return transcript
-#
-#     except Exception as e:
-#         logger.error(f"Failed to fetch transcript for video {video_id}: {e}")
-#         return None
+    return [
+        {'text': seg['text'], 'start': seg['start'], 'duration': seg['duration']}
+        for seg in transcript
+    ]
+
 
 def get_transcript_with_cache(video_id):
     if video_id in transcript_cache:
         return transcript_cache[video_id]
-
-    transcript = fetch_transcript_with_ytdlp(video_id)
-
-    if not transcript:
-        transcript = fetch_transcript_from_youtube(video_id)
+    transcript = fetch_transcript_with_super_data_api(video_id)
+    # Priority chain: YouTube API → RapidAPI → yt-dlp
+    # transcript = fetch_transcript_with_api(video_id)
+    # if not transcript:
+    #     transcript = fetch_transcript_with_rapidapi(video_id)
+    # if not transcript:
+    #     transcript = fetch_transcript_with_ytdlp(video_id)
 
     if transcript:
         full_text = " ".join([seg['text'] for seg in transcript])
@@ -316,51 +247,6 @@ def get_transcript_with_cache(video_id):
 
     return None
 
-
-# def get_transcript_with_cache(video_id):
-#     cache_key = f"transcript:{video_id}"
-#     cached_data = cache.get(cache_key)
-#
-#     if cached_data:
-#         return cached_data
-#
-#     transcript = fetch_transcript_with_ytdlp(video_id)
-#
-#     if not transcript:
-#         transcript = fetch_transcript_from_youtube(video_id)
-#
-#     if transcript:
-#         full_text = " ".join([seg['text'] for seg in transcript])
-#         transcript_data = {
-#             "segments": transcript,
-#             "full_text": full_text
-#         }
-#         # Cache it in Redis for 24 hours (86400 seconds)
-#         cache.set(cache_key, transcript_data, timeout=60 * 60 * 24)
-#         return transcript_data
-#
-#     return None
-
-
-
-#
-# def fetch_video_title_via_ytdlp(video_id):
-#     url = f"https://www.youtube.com/watch?v={video_id}"
-#
-#     try:
-#         ydl_opts = {
-#             'quiet': True,
-#             'no_warnings': True,
-#             'skip_download': True,
-#         }
-#
-#         with YoutubeDL(ydl_opts) as ydl:
-#             info = ydl.extract_info(url, download=False)
-#             return info.get('title')
-#
-#     except Exception as e:
-#         logger.error(f"Failed to fetch title for video {video_id}: {e}")
-#         return None
 
 
 
@@ -442,6 +328,8 @@ class AskQuestionAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        user = request.user
+
         serializer = YoutubeSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
@@ -450,13 +338,9 @@ class AskQuestionAPIView(APIView):
                 "errors": serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        user = request.user
         video_url = serializer.validated_data['youtube_video_url']
         question = serializer.validated_data['question']
-        time_stamp = serializer.validated_data['time_stamp']
-
-        # Optional: Normalize timestamp to int
-        time_stamp = int(time_stamp)
+        time_stamp = int(serializer.validated_data['time_stamp'])
 
         video_id = extract_youtube_video_id(video_url)
         if not video_id:
@@ -465,9 +349,7 @@ class AskQuestionAPIView(APIView):
                 "message": "Invalid YouTube URL."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        youtube_api_key = settings.YOUTUBE_API_KEY
-        video_title = get_video_title_with_cache(video_id, youtube_api_key)
-
+        video_title = get_video_title_with_cache(video_id, settings.YOUTUBE_API_KEY)
         if not video_title:
             return Response({
                 "success": False,
@@ -482,9 +364,15 @@ class AskQuestionAPIView(APIView):
 
         session, created = SessionModel.objects.get_or_create(user=user, video=video)
         session_status = "New session created" if created else "Session resumed"
+        limit_exceeded, limit_message = has_exceeded_question_limit(user, session)
+        if limit_exceeded:
+            return Response({
+                "success": False,
+                "message": limit_message,
+                "is_premium": bool(user.is_premium)
+            }, status=status.HTTP_403_FORBIDDEN)
 
         transcript_source = "model"
-
         transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
         full_transcript = transcript_obj.transcript_data if transcript_obj else None
 
@@ -502,7 +390,6 @@ class AskQuestionAPIView(APIView):
                 transcript_source = "fetched"
 
         available_lang_names = []
-
         if full_transcript:
             start_range = max(0, time_stamp - 60)
             end_range = time_stamp + 60
@@ -525,13 +412,12 @@ class AskQuestionAPIView(APIView):
                 f"Question: {question}\nAnswer:"
             )
         else:
-            # Fetch available transcript languages
             available_languages = get_transcript_languages_cached(video_id)
             available_lang_names = [lang["language_name"] for lang in available_languages]
 
             prompt = (
                 f"You are a helpful assistant. The user has a question about a YouTube video, but no English transcript is available. "
-                f"Based on the video title and context, do your best to help them. You can infer the possible content of the video based on the title and typical structure of such videos.\n\n"
+                f"Based on the video title and context, do your best to help them.\n\n"
                 f"Video Title: {video_title}\n"
                 f"Video URL: {video_url}\n"
                 f"Timestamp (seconds): {time_stamp}\n"
@@ -560,6 +446,7 @@ class AskQuestionAPIView(APIView):
             answer=answer,
             time_stamp=time_stamp
         )
+
         return Response({
             "success": True,
             "message": "Q&A created successfully.",
@@ -568,15 +455,15 @@ class AskQuestionAPIView(APIView):
                 'question': qa.question,
                 'answer': qa.answer,
                 'transcript_segment': transcript_segment if full_transcript else "Transcript not available.",
-                'session': session.id,
-                'session_status': session_status,
-                'time_stamp': qa.time_stamp,
-                'created_at': qa.created_at,
-                'transcript_source': transcript_source,  # <-- add this
-                'available_transcript_languages': available_lang_names if not full_transcript else []
+                # 'full_transcript': full_transcript if full_transcript else None,
+                # 'session': session.id,
+                # 'session_status': session_status,
+                # 'time_stamp': qa.time_stamp,
+                # 'created_at': qa.created_at,
+                # 'transcript_source': transcript_source,
+                # 'available_transcript_languages': available_lang_names if not full_transcript else []
             }
         }, status=status.HTTP_201_CREATED)
-
     def get(self, request):
         video_url = request.query_params.get('youtube_video_url')
         if not video_url:
@@ -666,115 +553,8 @@ class AskQuestionAPIView(APIView):
             }, status=status.HTTP_404_NOT_FOUND)
 
 
-class DebugTranscriptListFetcher(TranscriptListFetcher):
-    def _get(self, url):
-        logger.debug(f"Fetching URL: {url}")
-        response = requests.get(url, headers=self._headers)
-        logger.debug(f"Status code: {response.status_code}")
-        logger.debug(f"Raw response (first 500 chars): {response.text[:500]}")  # See the raw XML
-        return response.text
 
 
-# ✅ Patch headers and monkey patch fetcher
-def patch_youtube_headers():
-    try:
-        DebugTranscriptListFetcher._TranscriptListFetcher__DEFAULT_HEADERS = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        import youtube_transcript_api._api
-        youtube_transcript_api._api.TranscriptListFetcher = DebugTranscriptListFetcher
-        logger.info("Patched YouTube headers successfully.")
-    except Exception as e:
-        logger.error("Header patch failed: %s", str(e))
-
-
-class TestYouTubeAPIView(APIView):
-    def get(self, request, video_id):
-        logger.info(f"Transcript request received for video_id: {video_id}")
-        try:
-            patch_youtube_headers()
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            logger.info("Transcript list fetched successfully.")
-
-            available = [
-                {
-                    "language": t.language,
-                    "language_code": t.language_code,
-                    "generated": t.is_generated
-                }
-                for t in transcript_list
-            ]
-            logger.debug(f"Available transcripts: {available}")
-
-            transcript = None
-
-            # Try manually created English transcript
-            try:
-                transcript = transcript_list.find_manually_created_transcript(['en']).fetch()
-                logger.info("Manually created English transcript fetched.")
-            except Exception as e:
-                logger.warning("Manual 'en' transcript not found: %s", str(e))
-
-                # Fallback to en-GB, en-US, en-IN
-                for lang in ['en-GB', 'en-US', 'en-IN']:
-                    try:
-                        transcript = transcript_list.find_transcript([lang]).fetch()
-                        logger.info(f"Transcript fetched using fallback language: {lang}")
-                        break
-                    except Exception as fallback_error:
-                        logger.warning(f"Transcript fetch failed for fallback language '{lang}': {fallback_error}")
-
-                # Final fallback: first manually created transcript
-                # Final fallback: try all available transcripts (including generated ones)
-                if transcript is None:
-                    try:
-                        for t in transcript_list:
-                            try:
-                                data = t.fetch()
-                                if isinstance(data, list) and len(data) > 0:
-                                    transcript = data
-                                    logger.info(f"Fetched fallback transcript: {t.language_code}")
-                                    break
-                                else:
-                                    logger.warning(f"Empty transcript returned for: {t.language_code}")
-                            except ParseError as pe:
-                                logger.warning(f"Transcript parse error for {t.language_code}: {pe}")
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch transcript for {t.language_code}: {e}")
-                    except Exception as final_fallback_error:
-                        logger.error(f"Final fallback loop failed for video_id {video_id}: {final_fallback_error}")
-
-            # If still no transcript found
-            if transcript is None:
-                logger.error("All attempts to fetch transcript failed.")
-                return Response({
-                    "error": "Transcript fetch failed (empty or invalid response from YouTube)."
-                }, status=status.HTTP_502_BAD_GATEWAY)
-
-            return Response({
-                "available_transcripts": available,
-                "transcript": transcript,
-                "used_language_code": transcript_list.find_transcript([t['language_code'] for t in available if transcript]).language_code if transcript else None
-
-            }, status=status.HTTP_200_OK)
-
-        except TranscriptsDisabled:
-            logger.warning("Transcripts are disabled for this video.")
-            return Response({"error": "Transcripts are disabled for this video."}, status=status.HTTP_403_FORBIDDEN)
-        except NoTranscriptFound:
-            logger.warning("No transcript found for this video.")
-            return Response({"error": "No transcript found for this video."}, status=status.HTTP_404_NOT_FOUND)
-        except VideoUnavailable:
-            logger.warning("Video is unavailable.")
-            return Response({"error": "Video is unavailable."}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            logger.error("Unhandled error: %s", traceback.format_exc())
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ClipTabAPIView(APIView):
@@ -786,88 +566,9 @@ class ClipTabAPIView(APIView):
         buffer = io.BytesIO()
         image.save(buffer, format='JPEG', quality=85)
         return buffer.getvalue()
-
-    # def post(self, request):
-    #     serializer = ImageUploadSerializer(data=request.data, context={'request': request})
-    #     if not serializer.is_valid():
-    #         return Response({
-    #             "success": False,
-    #             "errors": serializer.errors,
-    #             "message": "Invalid data submitted."
-    #         }, status=status.HTTP_400_BAD_REQUEST)
-    #
-    #     data = serializer.validated_data
-    #     user = request.user
-    #     youtube_url = data['youtube_video_url']
-    #     time_stamp = data['time_stamp']  # Parsed TimestampField
-    #     image = data['image']
-    #     question = data.get('question', '')
-    #
-    #     # Extract video ID and video title
-    #     video_id = extract_youtube_video_id(youtube_url)
-    #     if not video_id:
-    #         return Response({
-    #             "success": False,
-    #             "message": "Invalid YouTube URL."
-    #         }, status=status.HTTP_400_BAD_REQUEST)
-    #
-    #     video_title = get_video_title_with_cache(video_id)
-    #     if not video_title:
-    #         return Response({
-    #             "success": False,
-    #             "message": "Failed to retrieve video title from YouTube."
-    #         }, status=status.HTTP_400_BAD_REQUEST)
-    #
-    #     # Get or create Video instance
-    #     video, _ = VideoModel.objects.get_or_create(
-    #         youtube_video_id=video_id,
-    #         defaults={'video_title': video_title, 'video_url': youtube_url, 'user': user}
-    #     )
-    #
-    #     # Get or create Session instance
-    #     session, created = SessionModel.objects.get_or_create(user=user, video=video)
-    #     session_status = "New session created" if created else "Session resumed"
-    #
-    #     try:
-    #         image_bytes = self.convert_png_to_jpeg(image)
-    #         mime_type = 'image/jpeg'
-    #
-    #         model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
-    #         response = model.generate_content([
-    #             question,
-    #             {"mime_type": mime_type, "data": image_bytes}
-    #         ])
-    #         answer = response.text.strip()
-    #     except Exception as e:
-    #         return Response({
-    #             "success": False,
-    #             "message": f"Gemini image model processing failed: {str(e)}"
-    #         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    #
-    #     # Save clip to database
-    #     clip = ImageModel.objects.create(
-    #         image=image,
-    #         question=question,
-    #         answer=answer,
-    #         time_stamp=time_stamp,
-    #         session=session
-    #     )
-    #
-    #     return Response({
-    #         "success": True,
-    #         "message": "Image clip created successfully.",
-    #         "data": {
-    #             'id': clip.id,
-    #             'question': clip.question,
-    #             'answer': clip.answer,
-    #             'session_id': session.id,
-    #             'session_status': session_status,
-    #             'time_stamp': time_stamp,
-    #             'created_at': clip.created_at,
-    #             'image_url': request.build_absolute_uri(clip.image.url)
-    #         }
-    #     }, status=status.HTTP_201_CREATED)
     def post(self, request):
+        user = request.user
+
         serializer = ImageUploadSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response({
@@ -877,19 +578,13 @@ class ClipTabAPIView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         data = serializer.validated_data
-        user = request.user
         youtube_url = data['youtube_video_url']
         time_stamp = data['time_stamp']
         image = data['image']
-
-        # ✅ Safe question handling
-        question = data.get('question') or ""
-        question = question.strip()
+        question = (data.get('question') or "").strip()
         answer = ""
 
-        print("Received question:", repr(question))  # Optional debug
-
-        # Extract video ID and title
+        # ✅ Extract video info
         video_id = extract_youtube_video_id(youtube_url)
         if not video_id:
             return Response({
@@ -904,15 +599,37 @@ class ClipTabAPIView(APIView):
                 "message": "Failed to retrieve video title from YouTube."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Get or create Video and Session
+        # ✅ Get or create Video and Session
         video, _ = VideoModel.objects.get_or_create(
             youtube_video_id=video_id,
-            defaults={'video_title': video_title, 'video_url': youtube_url, 'user': user}
+            user=user,
+            defaults={'video_title': video_title, 'video_url': youtube_url}
         )
         session, created = SessionModel.objects.get_or_create(user=user, video=video)
         session_status = "New session created" if created else "Session resumed"
 
-        # ✅ Only call Gemini if a question was given
+        # ✅ Rate Limiting Logic for Free Users
+        if not user.is_premium:
+            total_clips = ImageModel.objects.filter(session__user=user).count()
+            session_clips = ImageModel.objects.filter(session=session).count()
+
+            if total_clips >= 30:
+                return Response({
+                    "success": False,
+                    "message": "You have reached the total limit of 30 image uploads. Upgrade to premium to continue.",
+                    "limit_type": "total",
+                    "is_premium": False
+                }, status=status.HTTP_403_FORBIDDEN)
+
+            if session_clips >= 5:
+                return Response({
+                    "success": False,
+                    "message": "You can only upload 5 images per YouTube video. Please choose another video or upgrade to premium.",
+                    "limit_type": "session",
+                    "is_premium": False
+                }, status=status.HTTP_403_FORBIDDEN)
+
+
         if question:
             try:
                 image_bytes = self.convert_png_to_jpeg(image)
@@ -930,7 +647,7 @@ class ClipTabAPIView(APIView):
                     "message": f"Gemini image model processing failed: {str(e)}"
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # ✅ Save to DB no matter what
+        # ✅ Save clip
         clip = ImageModel.objects.create(
             image=image,
             question=question,
@@ -1055,7 +772,7 @@ class CreateNotesAPIView(APIView):
         user = request.user
         video_url = serializer.validated_data['youtube_video_url']
         notes = serializer.validated_data['notes']
-        time_stamp = serializer.validated_data['time_stamp']  # Already parsed by TimestampField
+        time_stamp = serializer.validated_data['time_stamp']
 
         video_id = extract_youtube_video_id(video_url)
         if not video_id:
@@ -1510,12 +1227,22 @@ class VideoAPIView(APIView):
                 session.is_active = True
                 session.save(update_fields=['is_active', 'last_accessed_at'])
 
-            # Transcript logic
+            # 🔍 Fetch transcript object if it exists
+            # 🔍 Fetch transcript object if it exists
             transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
-            transcript_created = False
+            transcript_created = False  # ✅ Initialize to avoid UnboundLocalError
 
-            if not transcript_obj:
+            # ✅ Print existing transcript (if found)
+            if transcript_obj:
+                print("✅ Existing transcript found:")
+                print("Transcript Text Preview:", transcript_obj.transcript_text)  # preview first 200 chars
+            else:
+                print("❌ No transcript found. Fetching from API...")
+
+                # 🧠 Get transcript from external source
                 transcript_data = get_transcript_with_cache(video_id)
+                print("Transcript API Response:", transcript_data)
+
                 if transcript_data:
                     transcript_obj, transcript_created = TranscriptModel.objects.get_or_create(
                         youtube_video_id=video_id,
@@ -1525,6 +1252,10 @@ class VideoAPIView(APIView):
                             'transcript_text': transcript_data.get("full_text", "")
                         }
                     )
+                    print("✅ Transcript created in DB:", transcript_created)
+                    print("Transcript Text:", transcript_data.get("full_text", ""))  # preview
+                else:
+                    print("❌ No transcript available from API.")
 
             return Response({
                 "status": "success",
@@ -1998,6 +1729,94 @@ class YoutubeTranscriptView(APIView):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
+# class YoutubeTranscriptView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        video_url = request.query_params.get('youtube_video_url')
+
+        if not video_url:
+            return Response({
+                "success": False,
+                "message": "Missing 'youtube_video_url' query parameter."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        video_id = extract_youtube_video_id(video_url)
+        if not video_id:
+            return Response({
+                "success": False,
+                "message": "Invalid YouTube URL."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        video_title = get_video_title_with_cache(video_id)
+        if not video_title:
+            return Response({
+                "success": False,
+                "message": "Could not retrieve video title."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 🔁 Get or create video
+        video, _ = VideoModel.objects.get_or_create(
+            youtube_video_id=video_id,
+            defaults={'video_title': video_title, 'video_url': video_url, 'user': user}
+        )
+
+        # 🔁 Get or create session
+        session, created = SessionModel.objects.get_or_create(user=user, video=video)
+        session_status = "New session created" if created else "Session resumed"
+
+        # 🔁 Check DB first
+        transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
+        full_transcript = transcript_obj.transcript_data if transcript_obj else None
+        transcript_source = "database"
+
+        if not full_transcript:
+            # ⏬ Try fetching from YouTube
+            transcript_data = get_transcript_with_cache(video_id)
+            full_transcript = transcript_data.get("segments") if transcript_data else None
+            transcript_source = "fetched"
+
+            if full_transcript:
+                TranscriptModel.objects.create(
+                    youtube_video_id=video_id,
+                    language='en',
+                    transcript_data=full_transcript,
+                    transcript_text=transcript_data.get("full_text", "")
+                )
+
+        if not full_transcript:
+            return Response({
+                "success": False,
+                "message": "Transcript not available in English. Try with a video that has English subtitles."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
+        segment_duration = 60
+        segmented_transcripts = {}
+
+        for entry in full_transcript:
+            segment_start = int(entry['start'] // segment_duration) * segment_duration
+            if segment_start not in segmented_transcripts:
+                segmented_transcripts[segment_start] = []
+            segmented_transcripts[segment_start].append(entry['text'])
+
+        formatted_segments = {
+            f"{start // 60}m - {(start + segment_duration) // 60}m":
+                " ".join(texts)
+            for start, texts in segmented_transcripts.items()
+        }
+
+        return Response({
+            "success": True,
+            "message": f"Transcript split successfully from {transcript_source}.",
+            "video_title": video_title,
+            "video_url": video_url,
+            # "session_id": session.id,
+            # "session_status": session_status,
+            "transcript_segments": formatted_segments,
+            "transcript_source": transcript_source
+        }, status=status.HTTP_200_OK)
 
 
 from rest_framework.generics import ListAPIView
@@ -2013,101 +1832,7 @@ class TranscriptListAPIView(ListAPIView):
     serializer_class = TranscriptSerializer
     pagination_class = TranscriptPagination
 
-import os
-import shutil
-import subprocess
-from datetime import datetime
-from tempfile import TemporaryDirectory
-
-from django.http import StreamingHttpResponse
-from rest_framework.parsers import JSONParser
 
 
 
-def generate_screenshot_ffmpeg_only(youtube_url: str, timestamp: float) -> str:
-    import subprocess
-    import os
-    import shutil
-    from datetime import datetime
-    from tempfile import TemporaryDirectory
-
-    with TemporaryDirectory() as tmpdir:
-        video_path = os.path.join(tmpdir, 'full_video.mp4')
-        output_image = os.path.join(tmpdir, 'frame.jpg')
-
-        print(f"[DEBUG] Downloading full video to: {video_path}")
-
-        try:
-            # Step 1: Download full video at lower resolution
-            yt_dlp_cmd = [
-                'yt-dlp',
-                '-f', 'bv[ext=mp4][height<=360]/bv/bestvideo[ext=mp4]/best[ext=mp4]',
-                '-o', video_path,
-                '--quiet', '--no-warnings',
-                youtube_url
-            ]
-            result1 = subprocess.run(yt_dlp_cmd, capture_output=True, text=True)
-            print("[YT-DLP stdout]:", result1.stdout)
-            print("[YT-DLP stderr]:", result1.stderr)
-            result1.check_returncode()
-
-            if not os.path.exists(video_path):
-                raise Exception("❌ yt-dlp did not download the video.")
-
-            # Step 2: Extract frame using ffmpeg
-            ffmpeg_cmd = [
-                'ffmpeg', '-ss', str(timestamp), '-i', video_path,
-                '-frames:v', '1', '-q:v', '2', output_image,
-                '-loglevel', 'error'
-            ]
-            result2 = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-            print("[FFMPEG stdout]:", result2.stdout)
-            print("[FFMPEG stderr]:", result2.stderr)
-            result2.check_returncode()
-
-            # Step 3: Move image to permanent location
-            final_path = os.path.join(os.getcwd(), f"screenshot_{int(datetime.now().timestamp())}.jpg")
-            shutil.move(output_image, final_path)
-            return final_path
-
-        except subprocess.CalledProcessError as e:
-            print(f"[ERROR] Subprocess failed: {e}")
-            raise
-        except Exception as e:
-            print(f"[ERROR] General error: {e}")
-            raise
-
-            raise
-class YouTubeScreenshotAPIView(APIView):
-    parser_classes = [JSONParser]
-
-    def post(self, request):
-        serializer = ScreenshotRequestSerializer(data=request.data)
-        if serializer.is_valid():
-            url = serializer.validated_data['url']
-            timestamp = serializer.validated_data['timestamp']
-
-            try:
-                image_path = generate_screenshot_ffmpeg_only(url, timestamp)
-
-                def file_iterator(path, chunk_size=8192):
-                    with open(path, 'rb') as f:
-                        while chunk := f.read(chunk_size):
-                            yield chunk
-                    # Cleanup after streaming is done
-                    try:
-                        os.remove(path)
-                    except Exception as e:
-                        print(f"[⚠️] Could not delete file: {e}")
-
-                response = StreamingHttpResponse(file_iterator(image_path), content_type='image/jpeg')
-                response['Content-Disposition'] = 'inline; filename="screenshot.jpg"'
-                return response
-
-            except subprocess.CalledProcessError:
-                return Response({"error": "Failed to process video"}, status=500)
-            except Exception as e:
-                return Response({"error": str(e)}, status=500)
-
-        return Response(serializer.errors, status=400)
 

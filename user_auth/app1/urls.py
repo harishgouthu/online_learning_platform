@@ -5,11 +5,9 @@ from .views import (CourseAPIView, AskQuestionAPIView, UserQaWatchedSessionsView
                     AllUsersWatchedSessionsView, ClipTabAPIView, UserClipWatchedSessionsView,
                     CreateNotesAPIView,  GetNotesAPIView, CombinedDataAPIView, CreateSessionAPIView,
                     VideoCourseUpdateView, YoutubeVideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView,
-                    CourseVideosAPIView, YoutubeTranscriptView, TestYouTubeAPIView, TranscriptListAPIView, YouTubeScreenshotAPIView)
+                    CourseVideosAPIView, YoutubeTranscriptView, TranscriptListAPIView)
 
 urlpatterns = [
-    # path('ytdlp-transcript/', YTDLPTranscriptAPIView.as_view(), name='ytdlp_transcript'),
-    path('screenshot/', YouTubeScreenshotAPIView.as_view(), name='youtube_screenshot'),
     path('transcripts/', TranscriptListAPIView.as_view(), name='transcript-list'),
     path('courses/', CourseAPIView.as_view(), name='course-api'),
     path('courses/<int:pk>/', CourseAPIView.as_view(), name='course-api-detail'),
@@ -28,7 +26,6 @@ urlpatterns = [
     path('create-note/', CreateNotesAPIView.as_view(), name='create-note'), #post/get/del
     path('notes/<int:note_id>/', CreateNotesAPIView.as_view(), name='update-note'), #edit
     path('youtube/transcript/', YoutubeTranscriptView.as_view(), name='youtube-transcript'),
-    path('test-youtube/<str:video_id>/', TestYouTubeAPIView.as_view(), name='test-youtube'),
 
     path('combined-api/', CombinedDataAPIView.as_view(), name='combinedapi'),#get/del
 
@@ -36,8 +33,8 @@ urlpatterns = [
     path('user-allvideos-clip-watched-sessions/', UserClipWatchedSessionsView.as_view(), name='user-watched-sessions'),#get/
     path('user-allvideos-notes-watched-sessions/', GetNotesAPIView.as_view(), name='get-notes'),#get/
     path('allusers-watched-sessions/', AllUsersWatchedSessionsView.as_view(), name='all-watched-sessions'),#get/
-    path('create-session/', CreateSessionAPIView.as_view(), name='create-session')
-
+    path('create-session/', CreateSessionAPIView.as_view(), name='create-session'),
+    # path('rapid-transcript/', RapidTranscriptAPIView.as_view(), name='test-rapid-api')
 ]
 
 

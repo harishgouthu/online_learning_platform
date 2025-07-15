@@ -14,6 +14,34 @@ from allauth.socialaccount.models import SocialAccount
 User = get_user_model()
 
 
+# class CustomRegisterSerializer(RegisterSerializer):
+#     username = None
+#     email = serializers.EmailField(required=True)
+#     password1 = serializers.CharField(write_only=True)
+#     password2 = serializers.CharField(write_only=True)
+#
+#     def validate_email(self, value):
+#         if User.objects.filter(email__iexact=value).exists():
+#             raise serializers.ValidationError("Email is already registered.")
+#         return value
+#
+#     def validate(self, data):
+#         if data["password1"] != data["password2"]:
+#             raise serializers.ValidationError("Passwords do not match.")
+#         return data
+#
+#     def save(self, request):
+#         adapter = get_adapter()
+#         user = adapter.new_user(request)
+#         self.cleaned_data = self.get_cleaned_data()
+#         adapter.save_user(request, user, self)
+#         setup_user_email(request, user, [])
+#         return user
+
+
+from .models import OTP
+from django.core.mail import send_mail  # or your preferred method
+
 class CustomRegisterSerializer(RegisterSerializer):
     username = None
     email = serializers.EmailField(required=True)
@@ -34,10 +62,23 @@ class CustomRegisterSerializer(RegisterSerializer):
         adapter = get_adapter()
         user = adapter.new_user(request)
         self.cleaned_data = self.get_cleaned_data()
+        user.is_active = False  # Inactive until OTP verified
         adapter.save_user(request, user, self)
         setup_user_email(request, user, [])
-        return user
 
+        # Create and send OTP
+        otp_obj, _ = OTP.objects.get_or_create(user=user)
+        otp_obj.generate_otp()
+
+        # Send email
+        send_mail(
+            subject="Your OTP Code",
+            message=f"Your OTP is: {otp_obj.code}",
+            from_email="no-reply@example.com",
+            recipient_list=[user.email],
+        )
+
+        return user  # ✅ Only return user
 
 
 

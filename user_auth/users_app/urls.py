@@ -18,7 +18,8 @@ from .views import (
     CustomRegisterView,
     CustomTokenObtainPairView,
     GoogleLogin,
-    LogoutView
+    LogoutView,
+    OTPVerifyView
 )
 from rest_framework_simplejwt.views import TokenVerifyView
 
@@ -37,4 +38,5 @@ urlpatterns = [
     path('google/login/', GoogleLogin.as_view(), name='google_login'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
+    path('verify-otp/', OTPVerifyView.as_view(), name='verify-otp'),
 ]

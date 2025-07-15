@@ -281,15 +281,22 @@ YOUTUBE_API_KEY = env('YOUTUBE_API_KEY')
 GOOGLE_APPLICATION_CREDENTIALS = env('GOOGLE_APPLICATION_CREDENTIALS')
 
 
+RAPIDAPI_KEY = env("RAPIDAPI_KEY")
+RAPIDAPI_HOST = env("RAPIDAPI_HOST", default="youtube-transcripts.p.rapidapi.com")
 
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': 'redis://127.0.0.1:6379/1',  # adjust as needed
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-        }
-    }
-}
+#
+#
+#
+# CACHES = {
+#     'default': {
+#         'BACKEND': 'django_redis.cache.RedisCache',
+#         'LOCATION': 'redis://127.0.0.1:6379/1',  # adjust as needed
+#         'OPTIONS': {
+#             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+#         }
+#     }
+# }
 
+
+MAX_FREE_QUESTIONS = 5
