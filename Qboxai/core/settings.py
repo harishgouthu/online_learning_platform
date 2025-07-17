@@ -221,6 +221,16 @@ DATABASES = {
     'default': env.db()
 }
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': env('DB_NAME'),
+#         'USER': env('DB_USER'),
+#         'PASSWORD': env('DB_PASSWORD'),
+#         'HOST': env('DB_HOST'),
+#         'PORT': env('DB_PORT'),
+#     }
+# }
 
 
 
@@ -289,14 +299,17 @@ RAPIDAPI_HOST = env("RAPIDAPI_HOST", default="youtube-transcripts.p.rapidapi.com
 #
 #
 # CACHES = {
-#     'default': {
-#         'BACKEND': 'django_redis.cache.RedisCache',
-#         'LOCATION': 'redis://127.0.0.1:6379/1',  # adjust as needed
-#         'OPTIONS': {
-#             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+#     "default": {
+#         "BACKEND": "django_redis.cache.RedisCache",
+#         "LOCATION": "redis://127.0.0.1:6379/1",  # Change to AWS ElastiCache endpoint if using in production
+#         "OPTIONS": {
+#             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+#             "SERIALIZER": "django_redis.serializers.json.JSONSerializer",  # Optional: readable cache format
+#             # "PASSWORD": "your_redis_password",  # If Redis is password protected
 #         }
 #     }
 # }
+
 
 
 MAX_FREE_QUESTIONS = 5
