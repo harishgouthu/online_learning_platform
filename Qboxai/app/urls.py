@@ -5,7 +5,7 @@ from .views import (CourseAPIView, AskQuestionAPIView, UserQaWatchedSessionsView
                     AllUsersWatchedSessionsView, ClipTabAPIView, UserClipWatchedSessionsView,
                     CreateNotesAPIView,  GetNotesAPIView, CombinedDataAPIView, CreateSessionAPIView,
                     VideoCourseUpdateView, YoutubeVideoCourseUpdateView, UnlinkedVideosAPIView, CourseVideoListView,
-                    CourseVideosAPIView, YoutubeTranscriptView, TranscriptListAPIView)
+                    CourseVideosAPIView, YoutubeTranscriptView, TranscriptListAPIView, GenerateMCQsAPIView, SubmitMCQAnswersAPIView)
 
 urlpatterns = [
     path('transcripts/', TranscriptListAPIView.as_view(), name='transcript-list'),
@@ -34,6 +34,8 @@ urlpatterns = [
     path('user-allvideos-notes-watched-sessions/', GetNotesAPIView.as_view(), name='get-notes'),#get/
     path('allusers-watched-sessions/', AllUsersWatchedSessionsView.as_view(), name='all-watched-sessions'),#get/
     path('create-session/', CreateSessionAPIView.as_view(), name='create-session'),
+    path('generate-mcqs/', GenerateMCQsAPIView.as_view(), name='generate-mcqs'),
+    path('submit-answers/', SubmitMCQAnswersAPIView.as_view(), name='submit_mcq_answers'),
     # path('rapid-transcript/', RapidTranscriptAPIView.as_view(), name='test-rapid-api')
 ]
 

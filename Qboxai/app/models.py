@@ -110,3 +110,46 @@ class BookmarkModel(models.Model):
     def __str__(self):
         return f"Bookmark at {self.time_stamp}s for session {self.session.id}"
 
+class MCQModel(models.Model):
+    session = models.ForeignKey(SessionModel, on_delete=models.CASCADE, related_name='mcqs')
+    question_text = models.TextField()
+    option_a = models.CharField(max_length=255)
+    option_b = models.CharField(max_length=255)
+    option_c = models.CharField(max_length=255)
+    option_d = models.CharField(max_length=255)
+    correct_option = models.CharField(max_length=1, choices=[('A','A'), ('B','B'), ('C','C'), ('D','D')])
+    explanation = models.TextField(null=True, blank=True)
+    difficulty = models.CharField(max_length=50, default='Medium')
+    question_type = models.CharField(max_length=50, default='MCQ')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.question_text
+from django.core.exceptions import ValidationError
+
+class MCQSubmission(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    session = models.ForeignKey('SessionModel', on_delete=models.CASCADE, related_name='submissions')
+    mcq = models.ForeignKey('MCQModel', on_delete=models.CASCADE)
+    selected_option = models.CharField(max_length=1, choices=[('A','A'), ('B','B'), ('C','C'), ('D','D')])
+    is_correct = models.BooleanField(blank=True, null=True)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'mcq', 'session')
+        ordering = ['-submitted_at']
+
+    def __str__(self):
+        return f"{self.user} - Q{self.mcq.id} - Ans: {self.selected_option}"
+
+    def save(self, *args, **kwargs):
+        if self.user != self.session.user:
+            raise ValidationError("Submission user must match session user.")
+
+        if self.mcq and self.selected_option:
+            self.is_correct = self.selected_option == self.mcq.correct_option
+
+        super().save(*args, **kwargs)
+
+
+

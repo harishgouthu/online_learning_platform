@@ -36,6 +36,7 @@ from .serializers import (
     YoutubeTranscriptSerializer,
     TimestampField,
     ScreenshotRequestSerializer,
+    MCQModelSerializer,
 )
 from .utils import check_question_limit,extract_youtube_video_id,get_video_title_with_cache,get_transcript_with_cache,get_transcript_languages_cached
 
@@ -1547,5 +1548,340 @@ class TranscriptListAPIView(ListAPIView):
 
 
 
+# views.py
+
+from .models import  MCQModel
+
+from django.utils import timezone
+# from .mcq_utils import *  # move your long logic to `mcq_utils.py`
+
+# User = get_user_model()
+
+# class GenerateMCQsAPIView(APIView):
+#     def post(self, request):
+#         youtube_url = request.data.get('youtube_url')
+#         user = request.user
+#
+#         if not youtube_url:
+#             return Response({'error': 'youtube_url is required'}, status=400)
+#
+#         video_id = extract_youtube_video_id(youtube_url)
+#         if not video_id:
+#             return Response({
+#                 "success": False,
+#                 "message": "Invalid YouTube URL."
+#             }, status=status.HTTP_400_BAD_REQUEST)
+#
+#         video_title = get_video_title_with_cache(video_id, settings.YOUTUBE_API_KEY)
+#         if not video_title:
+#             return Response({
+#                 "success": False,
+#                 "message": "Could not retrieve video title."
+#             }, status=status.HTTP_400_BAD_REQUEST)
+#
+#         video, _ = VideoModel.objects.get_or_create(
+#             user=user,
+#             youtube_video_id=video_id,
+#             defaults={'video_title': video_title, 'video_url': youtube_url}
+#         )
+#
+#         session, created = SessionModel.objects.get_or_create(user=user, video=video)
+#
+#         # Get transcript
+#         transcript = get_transcript_from_youtube(video_id)
+#         if not transcript:
+#             return Response({'error': 'Transcript fetch failed'}, status=500)
+#
+#         # Generate MCQs
+#         full_transcript = " ".join([line["text"] for line in transcript])
+#         mcq_text = generate_mcqs_from_transcript(full_transcript)
+#         if not mcq_text:
+#             return Response({'error': 'MCQ generation failed'}, status=500)
+#
+#         mcqs = parse_mcqs_to_json(mcq_text)
+#         if not mcqs:
+#             return Response({'error': 'MCQ parsing failed'}, status=500)
+#
+#         # Save to DB
+#         for mcq in mcqs:
+#             MCQModel.objects.create(
+#                 session=session,
+#                 question_text=mcq["question"],
+#                 option_a=mcq["options"]["A"],
+#                 option_b=mcq["options"]["B"],
+#                 option_c=mcq["options"]["C"],
+#                 option_d=mcq["options"]["D"],
+#                 correct_option=mcq["correct_answer"],
+#                 explanation=mcq["explanation"],
+#                 difficulty=mcq["difficulty"],
+#                 question_type=mcq["question_type"]
+#             )
+#
+#         return Response({
+#             "message": "MCQs generated and saved successfully",
+#             "video_id": video.youtube_video_id,
+#             "total_questions": len(mcqs),
+#         }, status=201)
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from django.conf import settings
+import logging
+
+from .models import VideoModel, SessionModel, TranscriptModel, MCQModel,MCQSubmission
+from .serializers import MCQModelSerializer
+from .utils import (
+    extract_youtube_video_id,
+    get_video_title_with_cache,
+    get_transcript_with_cache,
+    classify_question_type,
+    generate_mcqs_from_transcript,  # your new logic
+)
+
+logger = logging.getLogger(__name__)
+
+ALLOWED_DIFFICULTIES = {"Beginner", "Intermediate", "Advanced", "Expert"}
 
 
+class GenerateMCQsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        youtube_url = request.data.get("youtube_url")
+
+        if not youtube_url:
+            return Response({"detail": "youtube_url is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        video_id = extract_youtube_video_id(youtube_url)
+        if not video_id:
+            return Response({"success": False, "message": "Invalid YouTube URL."}, status=status.HTTP_400_BAD_REQUEST)
+
+        video_title = get_video_title_with_cache(video_id, settings.YOUTUBE_API_KEY)
+        if not video_title:
+            return Response({"success": False, "message": "Could not retrieve video title."}, status=status.HTTP_400_BAD_REQUEST)
+
+        video, _ = VideoModel.objects.get_or_create(
+            user=user,
+            youtube_video_id=video_id,
+            defaults={'video_title': video_title, 'video_url': youtube_url}
+        )
+        session, _ = SessionModel.objects.get_or_create(user=user, video=video)
+
+        transcript_obj = TranscriptModel.objects.filter(youtube_video_id=video_id).first()
+        full_transcript = transcript_obj.transcript_text if transcript_obj else None
+
+        if not full_transcript:
+            try:
+                transcript_data = get_transcript_with_cache(video_id)
+                full_transcript = transcript_data.get("full_text")
+                segments = transcript_data.get("segments")
+
+                if full_transcript and segments:
+                    TranscriptModel.objects.create(
+                        youtube_video_id=video_id,
+                        language='en',
+                        transcript_data=segments,
+                        transcript_text=full_transcript
+                    )
+            except Exception:
+                logger.exception("Transcript fetch failed.")
+                return Response({"error": "Transcript fetch failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        if not full_transcript:
+            return Response({
+                "success": False,
+                "message": "No transcript data found for this video."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            mcqs = generate_mcqs_from_transcript(full_transcript)
+            if not mcqs:
+                return Response({"detail": "Parsing Gemini response failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            logger.exception("MCQ generation failed")
+            return Response({"detail": "Failed to generate MCQs."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        saved_mcqs = []
+        for mcq in mcqs:
+            question = mcq.get("question")
+            options = mcq.get("options", {})
+            correct_answer = mcq.get("correct_answer")
+            explanation = mcq.get("explanation", "")
+            difficulty = mcq.get("difficulty", "").capitalize()
+
+            if difficulty not in ALLOWED_DIFFICULTIES:
+                difficulty = "Intermediate"
+
+            # ✅ Validate MCQ format before saving
+            if question and len(options) == 4 and all(k in options for k in ["A", "B", "C", "D"]) and correct_answer:
+                question_type = classify_question_type(question)
+                saved = MCQModel.objects.create(
+                    session=session,
+                    question_text=question,
+                    option_a=options.get("A", ""),
+                    option_b=options.get("B", ""),
+                    option_c=options.get("C", ""),
+                    option_d=options.get("D", ""),
+                    correct_option=correct_answer,
+                    explanation=explanation,
+                    difficulty=difficulty,
+                    question_type=question_type,
+                )
+                saved_mcqs.append(saved)
+        serializer = MCQModelSerializer(saved_mcqs, many=True)
+        return Response({
+            "video_id": video_id,
+            "success": True,
+            "message": f"{len(saved_mcqs)} MCQs generated successfully.",
+            "mcqs": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+
+# from django.shortcuts import get_object_or_404
+#
+# class SubmitMCQAnswersAPIView(APIView):
+#     permission_classes = [IsAuthenticated]
+#
+#     def post(self, request):
+#         user = request.user
+#         youtube_video_id = request.data.get("video_id")
+#         answers = request.data.get("answers", [])
+#
+#         if not youtube_video_id:
+#             return Response({"detail": "video_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+#
+#         if not isinstance(answers, list) or not answers:
+#             return Response({"detail": "Invalid or missing answers."}, status=status.HTTP_400_BAD_REQUEST)
+#
+#         # Use unique constraint to safely get the video
+#         try:
+#             video = VideoModel.objects.get(user=user, youtube_video_id=youtube_video_id)
+#         except VideoModel.DoesNotExist:
+#             return Response({"detail": "Video not found. Generate MCQs first."}, status=status.HTTP_404_NOT_FOUND)
+#         except VideoModel.MultipleObjectsReturned:
+#             return Response({"detail": "Multiple videos found. Please contact support."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+#
+#         # Get or create the session
+#         session, _ = SessionModel.objects.get_or_create(user=user, video=video)
+#
+#         results = []
+#         for answer in answers:
+#             mcq_id = answer.get("mcq_id")
+#             selected = answer.get("selected_option", "").upper()
+#
+#             if not mcq_id or selected not in ['A', 'B', 'C', 'D']:
+#                 continue
+#
+#             try:
+#                 mcq = MCQModel.objects.get(id=mcq_id, session=session)
+#             except MCQModel.DoesNotExist:
+#                 continue
+#
+#             is_correct = selected == mcq.correct_option.upper()
+#
+#             # Create or update the submission
+#             try:
+#                 submission, _ = MCQSubmission.objects.update_or_create(
+#                     user=user,
+#                     session=session,
+#                     mcq=mcq,
+#                     defaults={
+#                         "selected_option": selected,
+#                         "is_correct": is_correct,
+#                     }
+#                 )
+#                 results.append({
+#                     "mcq_id": mcq.id,
+#                     "question":mcq.question_text,
+#                     "selected_option": selected,
+#                     "is_correct": is_correct,
+#                     "correct_option": mcq.correct_option.upper(),
+#                     "explanation": mcq.explanation or "",
+#                 })
+#             except Exception as e:
+#                 # Optional: log error here
+#                 continue
+#
+#         return Response({
+#             "success": True,
+#             "message": "Answers submitted successfully.",
+#             "results": results
+#         }, status=status.HTTP_200_OK)
+
+from django.shortcuts import get_object_or_404
+
+class SubmitMCQAnswersAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        youtube_video_id = request.data.get("video_id")
+        answers = request.data.get("answers", [])
+
+        if not youtube_video_id:
+            return Response({"detail": "video_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not isinstance(answers, list) or not answers:
+            return Response({"detail": "Invalid or missing answers."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get the video safely
+        try:
+            video = VideoModel.objects.get(user=user, youtube_video_id=youtube_video_id)
+        except VideoModel.DoesNotExist:
+            return Response({"detail": "Video not found. Generate MCQs first."}, status=status.HTTP_404_NOT_FOUND)
+        except VideoModel.MultipleObjectsReturned:
+            return Response({"detail": "Multiple videos found. Please contact support."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Get or create the session
+        session, _ = SessionModel.objects.get_or_create(user=user, video=video)
+
+        results = []
+        for answer in answers:
+            mcq_id = answer.get("mcq_id")
+            selected = answer.get("selected_option", "").upper()
+
+            if not mcq_id or selected not in ['A', 'B', 'C', 'D']:
+                continue
+
+            try:
+                mcq = MCQModel.objects.get(id=mcq_id, session=session)
+            except MCQModel.DoesNotExist:
+                continue
+
+            is_correct = selected == mcq.correct_option.upper()
+
+            # Get correct option content dynamically
+            correct_label = mcq.correct_option.upper()
+            correct_content = getattr(mcq, f"option_{correct_label.lower()}", "")
+            correct_option_full = f"{correct_label}: {correct_content}"
+
+            # Create or update submission
+            try:
+                submission, _ = MCQSubmission.objects.update_or_create(
+                    user=user,
+                    session=session,
+                    mcq=mcq,
+                    defaults={
+                        "selected_option": selected,
+                        "is_correct": is_correct,
+                    }
+                )
+
+                results.append({
+                    "mcq_id": mcq.id,
+                    "question": mcq.question_text,
+                    "selected_option": selected,
+                    "is_correct": is_correct,
+                    "correct_option": correct_option_full,
+                    "explanation": mcq.explanation or "",
+                })
+            except Exception:
+                continue
+
+        return Response({
+            "success": True,
+            "message": "Answers submitted successfully.",
+            "results": results
+        }, status=status.HTTP_200_OK)

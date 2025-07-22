@@ -198,3 +198,9 @@ class TranscriptSerializer(serializers.ModelSerializer):
         model = TranscriptModel
         fields = ['id', 'youtube_video_id', 'language', 'created_at', 'updated_at', 'transcript_text']
 
+from .models import MCQModel
+
+class MCQModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MCQModel
+        fields = '__all__'
